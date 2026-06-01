@@ -1,0 +1,78 @@
+plugins {
+    id 'com.android.library'
+    id 'kotlin-android'
+    id 'kotlin-parcelize'
+}
+
+repositories {
+    maven { url 'https://maven.aliyun.com/repository/public' }
+    maven { url 'https://maven.aliyun.com/repository/google' }
+    google()
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+android {
+    namespace 'com.telegram.vpncore'
+    compileSdkVersion 35
+
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 35
+
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a", "x86", "x86_64"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+        freeCompilerArgs += ["-Xskip-metadata-version-check"]
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+        }
+        // Match the build types declared in :TMessagesProj so this library
+        // resolves for every app variant. All map onto this module's release.
+        standalone {
+            initWith release
+            matchingFallbacks = ['release']
+        }
+        HA_private {
+            initWith release
+            matchingFallbacks = ['release']
+        }
+        HA_public {
+            initWith release
+            matchingFallbacks = ['release']
+        }
+        HA_hardcore {
+            initWith release
+            matchingFallbacks = ['release']
+        }
+    }
+}
+
+dependencies {
+    // xray-core — локальный AAR (libs/libv2ray.aar)
+    implementation fileTree(dir: 'libs', include: ['*.aar'])
+
+    // Encrypted storage for VPN configs
+    implementation "androidx.security:security-crypto:1.1.0-alpha06"
+
+    // Coroutines
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+
+    // Core
+    implementation "androidx.core:core-ktx:1.13.1"
+}

@@ -1,0 +1,39 @@
+# === Secrets / credentials (NEVER commit) ===
+# Telegram API id/hash now live in telegram-android/local.properties
+local.properties
+**/local.properties
+# Firebase configs (contain project-specific keys)
+**/google-services.json
+**/agconnect-services.json
+# Signing keystores / certs
+*.keystore
+*.jks
+*.p8
+*.pfx
+release.keystore
+# Local tooling config
+.claude/
+*.env
+.env
+.env.*
+
+# === IDE ===
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# === Gradle / Android build artifacts ===
+.gradle/
+**/build/
+**/.cxx/
+obj/
+**/afat/
+TMessagesProj/jniLibs/
+TMessagesProj/jniRes/
+*.apk
+*.aab
+
+# === Misc ===
+**/.DS_Store
+*.log

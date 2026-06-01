@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.library'
+    id 'kotlin-android'
+    id 'kotlin-parcelize'
+}
+
+android {
+    namespace 'com.telegram.vpncore'
+    compileSdk 35
+
+    defaultConfig {
+        minSdk 24
+        targetSdk 35
+
+        // ABI split — xray-core ships arm64+armeabi-v7a
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+    }
+}
+
+dependencies {
+    // ─────────────────── xray-core via AndroidLibXrayLite ────────────────────
+    // Option A: JitPack release (recommended)
+    // Source: https://github.com/2dust/AndroidLibXrayLite
+    implementation 'com.github.2dust:AndroidLibXrayLite:1.8.24'
+
+    // Option B: local AAR (place in vpn-core/libs/)
+    // implementation fileTree(dir: 'libs', include: ['*.aar'])
+
+    // ─────────────────────────── Crypto storage ──────────────────────────────
+    implementation "androidx.security:security-crypto:1.1.0-alpha06"
+
+    // ─────────────────────────── Coroutines ──────────────────────────────────
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+
+    // ─────────────────────────── AndroidX ────────────────────────────────────
+    implementation "androidx.core:core-ktx:1.13.1"
+}
