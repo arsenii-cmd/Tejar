@@ -65,4 +65,4 @@ cd telegram-android
 - [Xray-core](https://github.com/XTLS/Xray-core) / [AndroidLibXrayLite](https://github.com/2dust/AndroidLibXrayLite) — the proxy core.
 
 This project inherits the GNU GPL v2 (or later) license of the upstream Telegram client — see
-[telegram-android/LICENSE](telegram-android/LICENSE).
+[telegram-android/LICENSE](telegram-android/LICENSE)
