@@ -1,10 +1,22 @@
-# Telegram + VPN integration
+# Tejar — Telegram + VPN integration
+
+![License](https://img.shields.io/badge/license-GPL--2.0-blue)
+![Platform](https://img.shields.io/badge/platform-Android-green)
+![Core](https://img.shields.io/badge/proxy-Xray-orange)
 
 A fork of the [Telegram for Android](https://github.com/DrKLO/Telegram) client with a built-in
 VPN / proxy module (`vpn-core`) powered by the [Xray](https://github.com/XTLS/Xray-core) core
 (via [AndroidLibXrayLite](https://github.com/2dust/AndroidLibXrayLite)).
 
 > This is a fresh, standalone snapshot — it does **not** carry the upstream Telegram git history.
+
+## What makes this unique
+
+Unlike running a separate VPN app alongside Telegram, **Tejar embeds the tunnel directly into the
+messenger**: the `vpn-core` module parses subscription links (VLESS / Trojan / Shadowsocks),
+generates the Xray config, and runs the proxy as a foreground service from inside the Telegram
+client itself. To our knowledge no other public Telegram fork ships an integrated Xray-based
+VPN core like this.
 
 ## Repository layout
 
