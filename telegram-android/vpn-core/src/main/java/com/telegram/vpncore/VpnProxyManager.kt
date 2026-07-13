@@ -178,9 +178,9 @@ class VpnProxyManager private constructor(private val context: Context) {
         }
     }
 
-    private suspend fun stopProxyInternal() {
+    private suspend fun stopProxyInternal(cancelWatchdog: Boolean = true) {
         try {
-            stopWatchdog()
+            if (cancelWatchdog) stopWatchdog()
             coreController?.stopLoop()
             coreController = null
             stopForegroundService()
@@ -268,7 +268,7 @@ class VpnProxyManager private constructor(private val context: Context) {
                     Log.w(TAG, "Watchdog: proxy port dead, restarting...")
                     val config = lastConnectedConfig ?: continue
                     mutex.withLock {
-                        stopProxyInternal()
+                        stopProxyInternal(cancelWatchdog = false)
                     }
                     _state.emit(ProxyState.Error("Connection lost"))
                     if (autoReconnect) {

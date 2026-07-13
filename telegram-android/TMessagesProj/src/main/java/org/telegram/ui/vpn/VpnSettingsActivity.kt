@@ -2,9 +2,9 @@ package org.telegram.ui.vpn
 
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
-import android.app.AlertDialog
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -59,11 +59,15 @@ class VpnSettingsActivity : BaseFragment() {
     private lateinit var autoReconnectSwitch: Switch
     private lateinit var autoReconnectDot: View
 
-    // ── Add config ────────────────────────────────────────────────
+    // ── Add config / subscription ───────────────────────────────────
+    private enum class AddMode { LINK, SUBSCRIPTION }
+    private var addMode = AddMode.LINK
     private lateinit var addInputCard: LinearLayout
     private lateinit var linkInput: EditText
     private lateinit var inlinePreview: LinearLayout
     private lateinit var addConnectBtn: TextView
+    private lateinit var modeLinkBtn: TextView
+    private lateinit var modeSubBtn: TextView
 
     // ── Saved configs ─────────────────────────────────────────────
     private var configsContainer: LinearLayout? = null
@@ -155,7 +159,7 @@ class VpnSettingsActivity : BaseFragment() {
         root.addView(buildEnergySavingRow(context, dp))
 
         // ════════ SUBSCRIPTIONS SECTION ════════
-        root.addView(buildSectionLabel(context, dp, "Subscriptions", "Add") { showAddSubscriptionDialog(context) })
+        root.addView(buildSectionLabel(context, dp, "Subscriptions"))
         subscriptionsContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -180,9 +184,8 @@ class VpnSettingsActivity : BaseFragment() {
         linkInput.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
                 val t = s?.toString()?.trim() ?: ""
-                if (t.length > 20) showInlinePreview(t) else hideInlinePreview()
-                addConnectBtn.text = if (t.isNotBlank()) "Save & Connect" else "Connect"
-                addConnectBtn.alpha = if (t.isNotBlank()) 1f else 0.5f
+                if (addMode == AddMode.LINK && t.length > 20) showInlinePreview(t) else hideInlinePreview()
+                updateAddButtonLabel()
             }
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -645,6 +648,30 @@ class VpnSettingsActivity : BaseFragment() {
             layoutParams = marginParams(bottom = dp(4))
         }
 
+        // Mode switcher: Link / Subscription — both add-flows live in this one
+        // always-visible card so neither is easy to miss.
+        fun modePill(text: String) = TextView(context).apply {
+            this.text = text
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+        }
+        modeLinkBtn = modePill("Link")
+        modeSubBtn = modePill("Subscription").apply { layoutParams = (layoutParams as LinearLayout.LayoutParams).apply { marginStart = dp(8) } }
+        val modeRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = marginParams(bottom = dp(8))
+        }
+        modeLinkBtn.setOnClickListener { setAddMode(AddMode.LINK) }
+        modeSubBtn.setOnClickListener { setAddMode(AddMode.SUBSCRIPTION) }
+        modeRow.addView(modeLinkBtn)
+        modeRow.addView(modeSubBtn)
+        wrapper.addView(modeRow)
+
         // Input card (contains EditText + inline preview strip)
         addInputCard = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -724,11 +751,65 @@ class VpnSettingsActivity : BaseFragment() {
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
             )
         }
-        addConnectBtn.setOnClickListener { onConnectClicked() }
+        addConnectBtn.setOnClickListener {
+            when (addMode) {
+                AddMode.LINK -> onConnectClicked()
+                AddMode.SUBSCRIPTION -> onAddSubscriptionClicked()
+            }
+        }
         btnRow.addView(addConnectBtn)
 
         wrapper.addView(btnRow)
+        setAddMode(AddMode.LINK)
         return wrapper
+    }
+
+    private fun setAddMode(mode: AddMode) {
+        addMode = mode
+        val dp = { v: Int -> AndroidUtilities.dp(v.toFloat()) }
+        modeLinkBtn.apply {
+            setTextColor(if (mode == AddMode.LINK) Color.WHITE else INK_DIM)
+            background = roundedBg(dp(10), if (mode == AddMode.LINK) BLUE else SURFACE_CT_HIGH)
+        }
+        modeSubBtn.apply {
+            setTextColor(if (mode == AddMode.SUBSCRIPTION) Color.WHITE else INK_DIM)
+            background = roundedBg(dp(10), if (mode == AddMode.SUBSCRIPTION) BLUE else SURFACE_CT_HIGH)
+        }
+        linkInput.hint = when (mode) {
+            AddMode.LINK -> "vless://  vmess://  ss://  trojan://"
+            AddMode.SUBSCRIPTION -> "https://example.com/sub/..."
+        }
+        hideInlinePreview()
+        updateAddButtonLabel()
+    }
+
+    private fun updateAddButtonLabel() {
+        val hasText = linkInput.text?.toString()?.isNotBlank() == true
+        when (addMode) {
+            AddMode.LINK -> {
+                addConnectBtn.text = if (hasText) "Save & Connect" else "Connect"
+                addConnectBtn.alpha = if (hasText) 1f else 0.5f
+            }
+            AddMode.SUBSCRIPTION -> {
+                addConnectBtn.text = "Add subscription"
+                addConnectBtn.alpha = if (hasText) 1f else 0.5f
+            }
+        }
+    }
+
+    private fun onAddSubscriptionClicked() {
+        val url = linkInput.text.toString().trim()
+        if (url.isBlank()) {
+            showToast("Paste a subscription URL first")
+            return
+        }
+        val ctx = context ?: return
+        val name = Uri.parse(url).host ?: "Subscription"
+        val sub = VpnSubscription(name = name, url = url)
+        subscriptionRepository.save(sub)
+        rebuildSubscriptionsList(ctx)
+        fetchSubscription(ctx, sub)
+        linkInput.setText("")
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -1035,7 +1116,7 @@ class VpnSettingsActivity : BaseFragment() {
         val subs = subscriptionRepository.getAll()
         if (subs.isEmpty()) {
             container.addView(TextView(context).apply {
-                text = "No subscriptions yet — tap Add to import a server-list URL"
+                text = "No subscriptions yet — switch to Subscription mode below to add one"
                 setTextColor(INK_DIM)
                 textSize = 12f
                 setPadding(dp(4), dp(2), dp(4), dp(8))
@@ -1115,42 +1196,6 @@ class VpnSettingsActivity : BaseFragment() {
 
             container.addView(row)
         }
-    }
-
-    private fun showAddSubscriptionDialog(context: Context) {
-        val dp = { v: Int -> AndroidUtilities.dp(v.toFloat()) }
-        val layout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), dp(4))
-        }
-        val nameInput = EditText(context).apply {
-            hint = "Name (e.g. My Sub)"
-            setTextColor(INK)
-            setHintTextColor(INK_VERY_MUTE)
-        }
-        val urlInput = EditText(context).apply {
-            hint = "Subscription URL"
-            setTextColor(INK)
-            setHintTextColor(INK_VERY_MUTE)
-        }
-        layout.addView(nameInput)
-        layout.addView(urlInput)
-
-        AlertDialog.Builder(context)
-            .setTitle("Add Subscription")
-            .setView(layout)
-            .setPositiveButton("Add") { _, _ ->
-                val name = nameInput.text.toString().trim().ifBlank { "Subscription" }
-                val url = urlInput.text.toString().trim()
-                if (url.isNotEmpty()) {
-                    val sub = VpnSubscription(name = name, url = url)
-                    subscriptionRepository.save(sub)
-                    rebuildSubscriptionsList(context)
-                    fetchSubscription(context, sub)
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     private fun fetchSubscription(context: Context, sub: VpnSubscription) {

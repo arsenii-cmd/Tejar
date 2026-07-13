@@ -18,17 +18,12 @@ class VpnBootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-        val repo = VpnConfigRepository(context)
-        val active = repo.getActive() ?: return
-        try {
-            val manager = VpnProxyManager.getInstance(context)
-            // Restore auto-reconnect preference
-            val prefs = context.getSharedPreferences("vpn_settings", Context.MODE_PRIVATE)
-            manager.autoReconnect = prefs.getBoolean("auto_reconnect", false)
-            manager.startProxy(active)
-            Log.d(TAG, "Boot restore initiated for ${active.displayName}")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to restore proxy on boot", e)
-        }
+        // Восстановление VPN-состояния теперь полностью выполняется в
+        // ApplicationLoader.onCreate() (глобальный ConnectionListener подключается
+        // там же до старта прокси). Этот receiver нужен только чтобы разбудить
+        // процесс на BOOT_COMPLETED — Application.onCreate() вызывается системой
+        // раньше, чем onReceive(), и уже делает всю работу; повторный вызов
+        // startProxy() отсюда приводил к гонке (двойной запуск).
+        Log.d(TAG, "Boot completed, app process started (restore handled in ApplicationLoader)")
     }
 }

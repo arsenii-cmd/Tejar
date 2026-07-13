@@ -22,7 +22,13 @@ class ProxyForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        if (intent == null) {
+            // Система перезапустила сервис после убийства процесса (START_STICKY).
+            // startForeground нужно вызвать немедленно, иначе будет RemoteServiceException.
+            startForeground(NOTIFICATION_ID, buildNotification(null))
+            return START_STICKY
+        }
+        when (intent.action) {
             ACTION_START -> {
                 val config = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(EXTRA_CONFIG, VpnConfig::class.java)
