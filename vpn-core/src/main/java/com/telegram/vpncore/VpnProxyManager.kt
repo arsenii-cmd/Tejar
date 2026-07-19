@@ -1,6 +1,5 @@
 package com.telegram.vpncore
 
-import android.app.ActivityManager
 import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Context
 import android.content.Intent
@@ -9,7 +8,6 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
-import android.os.Process
 import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
@@ -92,6 +90,8 @@ class VpnProxyManager private constructor(private val context: Context) {
         }
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    // Read from the network-callback thread and the watchdog (IO), written from startProxy (IO).
+    @Volatile
     private var lastConnectedConfig: VpnConfig? = null
 
     private fun registerNetworkMonitor() {
@@ -265,16 +265,15 @@ class VpnProxyManager private constructor(private val context: Context) {
                     false
                 }
                 if (!alive && _state.value is ProxyState.Connected) {
-                    Log.w(TAG, "Watchdog: proxy port dead, restarting...")
+                    // A dead local SOCKS port means the in-process xray core crashed. Recover
+                    // whenever lastConnectedConfig is set (user hasn't pressed Disconnect) —
+                    // NOT only when autoReconnect is on (that flag is about network changes).
+                    // Previously a single transient failure with autoReconnect off left the
+                    // proxy permanently down. startProxy() stops the stale core under the mutex
+                    // and restarts, so we don't stop/emit here (avoids an unlocked-state race).
                     val config = lastConnectedConfig ?: continue
-                    mutex.withLock {
-                        stopProxyInternal()
-                    }
-                    _state.emit(ProxyState.Error("Connection lost"))
-                    if (autoReconnect) {
-                        delay(2000)
-                        startProxy(config)
-                    }
+                    Log.w(TAG, "Watchdog: proxy port dead, restarting...")
+                    startProxy(config)
                 }
             }
         }
@@ -294,24 +293,17 @@ class VpnProxyManager private constructor(private val context: Context) {
 
     // ─────────────────────── Service lifecycle ───────────────────
 
-    private fun canStartForegroundService(): Boolean {
-        if (Build.VERSION.SDK_INT < 31) return true
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val appProcesses = am.runningAppProcesses ?: return false
-        val myPid = Process.myPid()
-        return appProcesses.any { it.pid == myPid && it.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND }
-    }
-
     private fun tryStartForegroundService(config: VpnConfig) {
         val intent = Intent(context, ProxyForegroundService::class.java).apply {
             action = ProxyForegroundService.ACTION_START
             putExtra(ProxyForegroundService.EXTRA_CONFIG, config)
         }
+        // Always attempt to start the FGS, even from background. Skipping it (as before) meant
+        // background-initiated starts (boot restore, auto-reconnect on network change, energy
+        // resume) ran the in-process xray with NO foreground service, so the OS could kill the
+        // process at any time and the proxy died silently. Boot / brief-foreground starts are
+        // exempt and will succeed; if the platform genuinely blocks it we catch below.
         try {
-            if (Build.VERSION.SDK_INT >= 31 && !canStartForegroundService()) {
-                Log.d(TAG, "App is in background, skipping foreground service start")
-                return
-            }
             ContextCompat.startForegroundService(context, intent)
         } catch (e: Exception) {
             if (Build.VERSION.SDK_INT >= 31 && e is ForegroundServiceStartNotAllowedException) {

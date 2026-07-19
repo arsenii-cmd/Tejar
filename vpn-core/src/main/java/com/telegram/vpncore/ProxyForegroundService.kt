@@ -30,14 +30,46 @@ class ProxyForegroundService : Service() {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(EXTRA_CONFIG)
                 }
-                startForeground(NOTIFICATION_ID, buildNotification(config))
+                startForegroundCompat(config)
             }
             ACTION_STOP -> {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
+            else -> {
+                // Sticky/redeliver restart with no usable intent: the in-process xray core
+                // is NOT owned by this service, so we can't resurrect the tunnel here. Stop
+                // cleanly instead of showing a "connected" notification with no proxy running.
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
-        return START_STICKY
+        // NOT_STICKY: on kill, don't let Android restart us with a null intent (which would
+        // show a fake "active" notification while xray is dead). VpnProxyManager owns restart.
+        return START_NOT_STICKY
+    }
+
+    private fun startForegroundCompat(config: VpnConfig?) {
+        // The specialUse FGS type constant is only valid on API 34+. Below that, the manifest
+        // type is ignored and a plain startForeground is correct (no FGS timeout exists there).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(config),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification(config))
+        }
+    }
+
+    /**
+     * Android 14+ may time out even specialUse FGS in edge cases; keep the notification alive
+     * without crashing (default behaviour throws). The tunnel itself keeps running in-process.
+     */
+    override fun onTimeout(startId: Int) {
+        // Do nothing — do not stop the service or the proxy. Swallowing the timeout keeps
+        // the process foreground-privileged instead of triggering the default RemoteServiceException.
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

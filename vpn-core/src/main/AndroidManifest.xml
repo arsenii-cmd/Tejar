@@ -3,7 +3,9 @@
 
     <!-- Required for foreground service (keeps xray-core alive in background) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- specialUse (not dataSync): dataSync FGS is capped at ~6h/24h on Android 14+,
+         after which the system force-stops it and the in-process xray dies. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- Internet access (inherited from app, but declared explicitly for clarity) -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -18,8 +20,12 @@
         <service
             android:name="com.telegram.vpncore.ProxyForegroundService"
             android:exported="false"
-            android:foregroundServiceType="dataSync"
-            android:stopWithTask="false" />
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn_proxy" />
+        </service>
 
         <receiver
             android:name="com.telegram.vpncore.VpnBootReceiver"

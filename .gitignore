@@ -1,3 +1,9 @@
+# Dev docs with secrets (signing keys, credentials) — never commit.
+# Lives in the parent D:\Creativ\TG folder (outside this repo); rule kept here
+# as a safeguard in case the docs are ever moved inside the repo.
+dev-docs/
+DEVELOPMENT.md
+
 .idea/
 .gradle/
 build/
