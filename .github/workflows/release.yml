@@ -1,0 +1,106 @@
+name: Build and release Standalone APK
+
+# Builds TMessagesProj_AppStandalone:afatStandalone, verifies the resulting APK is signed
+# with the expected certificate (so GithubUpdaterController's signature check on-device
+# actually accepts it), and publishes it as a GitHub Release asset named to match
+# GithubUpdaterController's ASSET_NAME_PATTERN: Tejar-<versionName>-<versionCode>-arm64-standalone.apk
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      changelog:
+        description: "Release notes (used as the release body)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required NDK
+        run: sdkmanager --install "ndk;27.2.12479018"
+
+      - name: Write signing secrets
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          TG_APP_ID: ${{ secrets.TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+        run: |
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > TMessagesProj/config/release.keystore
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
+          APP_ID=$TG_APP_ID
+          APP_HASH=$TG_APP_HASH
+          EOF
+
+      - name: Build afatStandalone APK
+        run: |
+          ./gradlew :TMessagesProj_AppStandalone:assembleAfatStandalone \
+            -PRELEASE_STORE_PASSWORD="${{ secrets.RELEASE_STORE_PASSWORD }}" \
+            -PRELEASE_KEY_ALIAS="${{ secrets.RELEASE_KEY_ALIAS }}" \
+            -PRELEASE_KEY_PASSWORD="${{ secrets.RELEASE_KEY_PASSWORD }}"
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          apk_path="TMessagesProj_AppStandalone/build/outputs/apk/afat/standalone/app.apk"
+          if [ ! -f "$apk_path" ]; then
+            echo "Built APK not found at $apk_path" >&2
+            exit 1
+          fi
+          echo "path=$apk_path" >> "$GITHUB_OUTPUT"
+
+      - name: Verify APK signing certificate
+        env:
+          EXPECTED_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
+        run: |
+          build_tools="$ANDROID_HOME/build-tools/35.0.0"
+          fingerprint=$("$build_tools/apksigner" verify --print-certs "${{ steps.apk.outputs.path }}" \
+            | grep "signer #1 certificate SHA-256" | awk '{print $NF}' | tr 'a-f' 'A-F')
+          echo "APK signed with: $fingerprint"
+          if [ -z "$EXPECTED_CERT_SHA256" ]; then
+            echo "::warning::RELEASE_CERT_SHA256 secret not set — skipping fingerprint pinning check."
+          elif [ "$fingerprint" != "$(echo "$EXPECTED_CERT_SHA256" | tr 'a-f' 'A-F')" ]; then
+            echo "::error::APK signing certificate does not match RELEASE_CERT_SHA256 — wrong keystore/secret, refusing to publish."
+            exit 1
+          fi
+
+      - name: Compute version name/code and rename asset
+        id: version
+        run: |
+          version_name=$(grep '^APP_VERSION_NAME=' gradle.properties | cut -d= -f2)
+          version_code_base=$(grep '^APP_VERSION_CODE=' gradle.properties | cut -d= -f2)
+          # Matches TMessagesProj_AppStandalone/build.gradle: versionCode * 10 + abiVersionCode (afat=9)
+          version_code=$((version_code_base * 10 + 9))
+          asset_name="Tejar-${version_name}-${version_code}-arm64-standalone.apk"
+          mkdir -p release-out
+          cp "${{ steps.apk.outputs.path }}" "release-out/$asset_name"
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+          echo "asset_path=release-out/$asset_name" >> "$GITHUB_OUTPUT"
+          echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Tejar ${{ steps.version.outputs.version_name }}"
+          body: ${{ github.event.inputs.changelog }}
+          files: ${{ steps.version.outputs.asset_path }}
+          fail_on_unmatched_files: true
