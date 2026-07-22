@@ -94,8 +94,10 @@ class ProxyForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val title = if (config != null) "VPN Proxy: ${config.displayName}" else "VPN Proxy Active"
-        val text = if (config != null) "${config.protocolLabel} · ${config.address}:${config.port}" else "Connected"
+        // Deliberately no server address/port here — this notification is visible on the
+        // lockscreen without unlocking the device.
+        val title = "VPN Proxy Active"
+        val text = if (config != null) config.protocolLabel else "Connected"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
@@ -103,6 +105,7 @@ class ProxyForegroundService : Service() {
             .setSmallIcon(android.R.drawable.ic_lock_lock) // Replace with custom icon
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .addAction(android.R.drawable.ic_delete, "Disconnect", stopPi)
             .build()
     }

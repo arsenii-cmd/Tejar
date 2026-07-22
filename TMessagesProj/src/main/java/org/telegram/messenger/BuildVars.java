@@ -26,8 +26,10 @@ public class BuildVars {
     public static boolean NO_SCOPED_STORAGE = Build.VERSION.SDK_INT <= 29;
     public static String BUILD_VERSION_STRING = BuildConfig.BUILD_VERSION_STRING;
 
-    public static int APP_ID = 0; // REDACTED, was hardcoded
-    public static String APP_HASH = "REDACTED_APP_HASH";
+    // Set via local.properties (APP_ID / APP_HASH) — see TMessagesProj/build.gradle getProps().
+    // Get your own at https://my.telegram.org — never hardcode/commit these here.
+    public static int APP_ID = BuildConfig.TG_APP_ID;
+    public static String APP_HASH = BuildConfig.TG_APP_HASH;
 
     // SafetyNet key for Google Identity SDK, set it to empty to disable
     public static String SAFETYNET_KEY = "AIzaSyDqt8P-7F7CPCseMkOiVRgb1LY8RN1bvH8";

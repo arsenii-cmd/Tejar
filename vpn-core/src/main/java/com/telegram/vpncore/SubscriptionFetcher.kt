@@ -19,6 +19,7 @@ object SubscriptionFetcher {
 
     private const val TAG = "SubscriptionFetcher"
     private const val TIMEOUT_MS = 15_000
+    private const val MAX_REDIRECTS = 5
 
     // User-Agents to try in order — Marzban picks the response format based on UA
     private val USER_AGENTS = listOf(
@@ -28,6 +29,9 @@ object SubscriptionFetcher {
     )
 
     suspend fun fetch(url: String): List<VpnConfig> = withContext(Dispatchers.IO) {
+        require(url.startsWith("https://", ignoreCase = true)) {
+            "Subscription URL must use HTTPS: $url"
+        }
         var lastError: Exception? = null
         for (ua in USER_AGENTS) {
             try {
@@ -49,19 +53,36 @@ object SubscriptionFetcher {
     // ─────────────────────── Download ────────────────────────────
 
     private fun downloadText(url: String, userAgent: String): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = TIMEOUT_MS
-        conn.readTimeout = TIMEOUT_MS
-        conn.setRequestProperty("User-Agent", userAgent)
-        conn.setRequestProperty("Accept", "*/*")
-        conn.instanceFollowRedirects = true
-        return try {
-            val code = conn.responseCode
-            if (code != 200) throw Exception("HTTP $code")
-            conn.inputStream.bufferedReader().readText()
-        } finally {
-            conn.disconnect()
+        // Follow redirects manually so we can reject any hop that downgrades to plain HTTP
+        // (java.net's instanceFollowRedirects silently follows https->http, opening it up to MITM).
+        var currentUrl = url
+        repeat(MAX_REDIRECTS + 1) { attempt ->
+            require(currentUrl.startsWith("https://", ignoreCase = true)) {
+                "Refusing non-HTTPS subscription URL: $currentUrl"
+            }
+            val conn = URL(currentUrl).openConnection() as HttpURLConnection
+            conn.connectTimeout = TIMEOUT_MS
+            conn.readTimeout = TIMEOUT_MS
+            conn.setRequestProperty("User-Agent", userAgent)
+            conn.setRequestProperty("Accept", "*/*")
+            conn.instanceFollowRedirects = false
+            try {
+                val code = conn.responseCode
+                when (code) {
+                    200 -> return conn.inputStream.bufferedReader().readText()
+                    in 300..399 -> {
+                        val location = conn.getHeaderField("Location")
+                            ?: throw Exception("HTTP $code without Location")
+                        currentUrl = URL(URL(currentUrl), location).toString()
+                        if (attempt == MAX_REDIRECTS) throw Exception("Too many redirects")
+                    }
+                    else -> throw Exception("HTTP $code")
+                }
+            } finally {
+                conn.disconnect()
+            }
         }
+        throw Exception("Too many redirects")
     }
 
     // ─────────────────────── Parse ────────────────────────────────
@@ -96,10 +117,20 @@ object SubscriptionFetcher {
             try {
                 results.add(LinkParser.parse(trimmed))
             } catch (e: Exception) {
-                Log.w(TAG, "Skipping invalid link: ${trimmed.take(60)} — ${e.message}")
+                Log.w(TAG, "Skipping invalid link: ${redactCredentials(trimmed).take(60)} — ${e.message}")
             }
         }
         return results
+    }
+
+    /**
+     * Strips secrets before a link preview hits logcat: the userinfo portion (uuid/password
+     * before '@') for vless/trojan/ss, or the whole opaque payload for vmess (it's a single
+     * base64 blob with no '@' separator, so there's no safe prefix to show).
+     */
+    private fun redactCredentials(link: String): String {
+        if (link.startsWith("vmess://", ignoreCase = true)) return "vmess://***"
+        return link.replaceFirst(Regex("""^(\w+://)[^@/\s]+@"""), "$1***@")
     }
 
     /**
@@ -119,7 +150,7 @@ object SubscriptionFetcher {
             try {
                 results.add(LinkParser.parse(link))
             } catch (e: Exception) {
-                Log.w(TAG, "Skipping HTML link: ${link.take(60)} — ${e.message}")
+                Log.w(TAG, "Skipping HTML link: ${redactCredentials(link).take(60)} — ${e.message}")
             }
         }
         return results

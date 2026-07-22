@@ -749,8 +749,10 @@ class VpnSettingsActivity : BaseFragment() {
         }
     }
 
-    private fun injectProxy() =
-        TelegramProxyBridge.enableProxy(VpnProxyManager.LOCAL_HOST, VpnProxyManager.LOCAL_PORT)
+    private fun injectProxy() {
+        val (user, pass) = manager.getSocksCredentials()
+        TelegramProxyBridge.enableProxy(VpnProxyManager.LOCAL_HOST, VpnProxyManager.LOCAL_PORT, user, pass)
+    }
 
     private fun clearProxy() = TelegramProxyBridge.disableProxy()
 

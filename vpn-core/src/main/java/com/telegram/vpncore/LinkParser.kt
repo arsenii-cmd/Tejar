@@ -3,7 +3,6 @@ package com.telegram.vpncore
 import android.net.Uri
 import android.util.Base64
 import org.json.JSONObject
-import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
 /**
@@ -39,8 +38,10 @@ object LinkParser {
         val uri = Uri.parse(link)
         val uuid = uri.userInfo ?: throw IllegalArgumentException("VLESS: missing UUID")
         val host = uri.host ?: throw IllegalArgumentException("VLESS: missing host")
-        val port = uri.port.takeIf { it > 0 } ?: throw IllegalArgumentException("VLESS: missing port")
-        val name = uri.fragment?.urlDecode() ?: ""
+        val port = uri.port.takeIf { it in 1..65535 } ?: throw IllegalArgumentException("VLESS: invalid port")
+        // Uri already URL-decodes fragment/query values — decoding again here corrupted any
+        // value containing a literal '%' (e.g. a path segment or name with percent-encoding).
+        val name = uri.fragment ?: ""
 
         val networkStr = uri.getQueryParameter("type") ?: "tcp"
         val securityStr = uri.getQueryParameter("security") ?: "none"
@@ -49,8 +50,8 @@ object LinkParser {
         val fingerprint = uri.getQueryParameter("fp") ?: "chrome"
         val publicKey = uri.getQueryParameter("pbk") ?: ""
         val shortId = uri.getQueryParameter("sid") ?: ""
-        val spiderX = uri.getQueryParameter("spx")?.urlDecode() ?: ""
-        val path = uri.getQueryParameter("path")?.urlDecode() ?: ""
+        val spiderX = uri.getQueryParameter("spx") ?: ""
+        val path = uri.getQueryParameter("path") ?: ""
         val wsHost = uri.getQueryParameter("host") ?: sni
         val serviceName = uri.getQueryParameter("serviceName") ?: ""
 
@@ -89,7 +90,8 @@ object LinkParser {
         }
 
         val host = json.optString("add").ifBlank { throw IllegalArgumentException("VMess: missing add") }
-        val port = json.optString("port").toIntOrNull() ?: json.optInt("port")
+        val port = (json.optString("port").toIntOrNull() ?: json.optInt("port"))
+            .takeIf { it in 1..65535 } ?: throw IllegalArgumentException("VMess: invalid port")
         val uuid = json.optString("id").ifBlank { throw IllegalArgumentException("VMess: missing id") }
         val name = json.optString("ps").ifBlank { "$host:$port" }
         val alterId = json.optString("aid").toIntOrNull() ?: json.optInt("aid", 0)
@@ -127,16 +129,22 @@ object LinkParser {
         // Modern: ss://BASE64(method:password)@host:port#name
         // Legacy: ss://BASE64(method:password@host:port)#name
         val withoutScheme = link.removePrefix("ss://")
-        val name = Uri.parse(link).fragment?.urlDecode() ?: ""
+        val name = Uri.parse(link).fragment ?: ""
 
         return if (withoutScheme.contains("@")) {
-            // Modern SIP002 format
+            // Modern SIP002 format — userinfo is usually base64(method:password), but the spec
+            // also allows it to be sent as plaintext "method:password" directly.
             val uri = Uri.parse(link)
-            val userInfoDecoded = String(Base64.decode(uri.userInfo ?: "", Base64.URL_SAFE or Base64.NO_PADDING))
+            val rawUserInfo = uri.userInfo ?: ""
+            val userInfoDecoded = try {
+                String(Base64.decode(rawUserInfo, Base64.URL_SAFE or Base64.NO_PADDING))
+            } catch (e: Exception) {
+                rawUserInfo
+            }
             val (method, password) = userInfoDecoded.split(":", limit = 2)
                 .let { it[0] to it.getOrElse(1) { "" } }
             val host = uri.host ?: throw IllegalArgumentException("SS: missing host")
-            val port = uri.port.takeIf { it > 0 } ?: throw IllegalArgumentException("SS: missing port")
+            val port = uri.port.takeIf { it in 1..65535 } ?: throw IllegalArgumentException("SS: invalid port")
 
             VpnConfig(
                 name = name,
@@ -159,7 +167,7 @@ object LinkParser {
             val (method, password) = methodPassword.split(":", limit = 2)
                 .let { it[0] to it.getOrElse(1) { "" } }
             val host = hostPort.substringBeforeLast(":")
-            val port = hostPort.substringAfterLast(":").toIntOrNull()
+            val port = hostPort.substringAfterLast(":").toIntOrNull()?.takeIf { it in 1..65535 }
                 ?: throw IllegalArgumentException("SS: invalid port")
 
             VpnConfig(
@@ -181,14 +189,14 @@ object LinkParser {
         val uri = Uri.parse(link)
         val password = uri.userInfo ?: throw IllegalArgumentException("Trojan: missing password")
         val host = uri.host ?: throw IllegalArgumentException("Trojan: missing host")
-        val port = uri.port.takeIf { it > 0 } ?: throw IllegalArgumentException("Trojan: missing port")
-        val name = uri.fragment?.urlDecode() ?: ""
+        val port = uri.port.takeIf { it in 1..65535 } ?: throw IllegalArgumentException("Trojan: invalid port")
+        val name = uri.fragment ?: ""
 
         val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("peer") ?: host
         val fingerprint = uri.getQueryParameter("fp") ?: "chrome"
         val secStr = uri.getQueryParameter("security") ?: "tls"
         val networkStr = uri.getQueryParameter("type") ?: "tcp"
-        val path = uri.getQueryParameter("path")?.urlDecode() ?: ""
+        val path = uri.getQueryParameter("path") ?: ""
         val wsHost = uri.getQueryParameter("host") ?: sni
 
         return VpnConfig(
@@ -208,9 +216,6 @@ object LinkParser {
     }
 
     // ───────────────────────── Helpers ────────────────────────────
-
-    private fun String.urlDecode(): String =
-        URLDecoder.decode(this, "UTF-8")
 
     private fun String.toNetworkType(): NetworkType = when (lowercase()) {
         "ws" -> NetworkType.WS

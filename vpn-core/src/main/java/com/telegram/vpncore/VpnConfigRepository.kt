@@ -37,12 +37,23 @@ class VpnConfigRepository(context: Context) {
 
     fun getAll(): List<VpnConfig> {
         val raw = prefs.getString(KEY_CONFIGS, "[]") ?: "[]"
-        return try {
-            val arr = JSONArray(raw)
-            (0 until arr.length()).map { deserialize(arr.getJSONObject(it)) }
+        val arr = try {
+            JSONArray(raw)
         } catch (e: Exception) {
-            emptyList()
+            return emptyList()
         }
+        // Skip only the entries that fail to parse — a single corrupt config used to fail the
+        // whole array, and since save() persists getAll() + the edit, that silently wiped every
+        // other saved config on the next save.
+        val result = mutableListOf<VpnConfig>()
+        for (i in 0 until arr.length()) {
+            try {
+                result.add(deserialize(arr.getJSONObject(i)))
+            } catch (e: Exception) {
+                // drop this one entry only
+            }
+        }
+        return result
     }
 
     fun save(config: VpnConfig) {

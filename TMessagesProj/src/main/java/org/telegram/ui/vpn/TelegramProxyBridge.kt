@@ -10,9 +10,9 @@ object TelegramProxyBridge {
 
     private const val TAG = "TelegramProxyBridge"
 
-    fun enableProxy(host: String, port: Int) {
+    fun enableProxy(host: String, port: Int, username: String, password: String) {
         try {
-            val proxyInfo = SharedConfig.ProxyInfo(host, port, "", "", "")
+            val proxyInfo = SharedConfig.ProxyInfo(host, port, username, password, "")
             SharedConfig.addProxy(proxyInfo)
             SharedConfig.currentProxy = proxyInfo
             SharedConfig.saveConfig()
@@ -24,14 +24,14 @@ object TelegramProxyBridge {
             // locally — the intermittent "proxy stops working" symptom.
             val editor = MessagesController.getGlobalMainSettings().edit()
             editor.putString("proxy_ip", host)
-            editor.putString("proxy_user", "")
-            editor.putString("proxy_pass", "")
+            editor.putString("proxy_user", username)
+            editor.putString("proxy_pass", password)
             editor.putString("proxy_secret", "")
             editor.putInt("proxy_port", port)
             editor.putBoolean("proxy_enabled", true)
             editor.commit()
 
-            ConnectionsManager.setProxySettings(true, host, port, "", "", "")
+            ConnectionsManager.setProxySettings(true, host, port, username, password, "")
 
             NotificationCenter.getGlobalInstance()
                 .postNotificationName(NotificationCenter.proxySettingsChanged)

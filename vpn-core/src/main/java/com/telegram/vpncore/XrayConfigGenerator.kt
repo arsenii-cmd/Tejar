@@ -11,7 +11,7 @@ import org.json.JSONObject
  */
 object XrayConfigGenerator {
 
-    fun generate(config: VpnConfig, localPort: Int = 10808): String {
+    fun generate(config: VpnConfig, localPort: Int = 10808, socksUser: String, socksPass: String): String {
         val root = JSONObject()
 
         // ── log ──────────────────────────────────────────────────
@@ -27,8 +27,18 @@ object XrayConfigGenerator {
                 put("listen", "127.0.0.1")
                 put("port", localPort)
                 put("settings", JSONObject().apply {
-                    put("udp", false)
-                    put("auth", "noauth")
+                    // Voice/video calls need UDP relayed through the tunnel, not just TCP.
+                    put("udp", true)
+                    // 127.0.0.1 is reachable by every app on the device, not just this one —
+                    // require the per-session credentials generated in VpnProxyManager so other
+                    // apps can't ride the tunnel just by knowing the well-known local port.
+                    put("auth", "password")
+                    put("accounts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("user", socksUser)
+                            put("pass", socksPass)
+                        })
+                    })
                 })
                 put("sniffing", JSONObject().apply {
                     put("enabled", true)
@@ -77,11 +87,12 @@ object XrayConfigGenerator {
         })
 
         // ── dns ──────────────────────────────────────────────────
+        // No "localhost" fallback here: that resolves via the system's plaintext resolver,
+        // leaking queries outside the tunnel whenever the tunneled DNS servers are slow/down.
         root.put("dns", JSONObject().apply {
             put("servers", JSONArray().apply {
                 put("8.8.8.8")
                 put("1.1.1.1")
-                put("localhost")
             })
         })
 

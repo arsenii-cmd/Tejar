@@ -362,8 +362,8 @@ public class ApplicationLoader extends Application {
             // Wire up proxy ↔ Telegram globally (fires on every connect/disconnect).
             vpnManager.addConnectionListener(new VpnProxyManager.ConnectionListener() {
                 @Override
-                public void onProxyConnected(String host, int port) {
-                    TelegramProxyBridge.INSTANCE.enableProxy(host, port);
+                public void onProxyConnected(String host, int port, String username, String password) {
+                    TelegramProxyBridge.INSTANCE.enableProxy(host, port, username, password);
                 }
 
                 @Override

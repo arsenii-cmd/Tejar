@@ -18,7 +18,6 @@ import kotlinx.coroutines.sync.withLock
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
-import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -35,7 +34,7 @@ class VpnProxyManager private constructor(private val context: Context) {
      * Registered listeners are notified on the Main thread.
      */
     interface ConnectionListener {
-        fun onProxyConnected(host: String, port: Int)
+        fun onProxyConnected(host: String, port: Int, username: String, password: String)
         fun onProxyDisconnected()
     }
 
@@ -80,6 +79,24 @@ class VpnProxyManager private constructor(private val context: Context) {
     private var coreController: CoreController? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mutex = Mutex()
+
+    // Regenerated on every startProxy() — random per-session SOCKS5 credentials so other apps
+    // on the device can't use the local proxy just by knowing the well-known loopback port.
+    @Volatile
+    private var socksUsername: String = ""
+    @Volatile
+    private var socksPassword: String = ""
+
+    private fun generateSocksCredentials() {
+        socksUsername = randomToken()
+        socksPassword = randomToken()
+    }
+
+    private fun randomToken(): String {
+        val bytes = ByteArray(16)
+        java.security.SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
 
     // ───────────────────── Auto-reconnect ────────────────────────
 
@@ -137,14 +154,14 @@ class VpnProxyManager private constructor(private val context: Context) {
                 }
                 _state.emit(ProxyState.Connecting)
                 try {
-                    val jsonConfig = XrayConfigGenerator.generate(config, LOCAL_PORT)
-                    writeConfigFile(jsonConfig)
+                    generateSocksCredentials()
+                    val jsonConfig = XrayConfigGenerator.generate(config, LOCAL_PORT, socksUsername, socksPassword)
                     startXray(jsonConfig, config)
                     lastConnectedConfig = config
                     _state.emit(ProxyState.Connected(config))
                     Log.d(TAG, "Proxy started on $LOCAL_HOST:$LOCAL_PORT")
                     withContext(Dispatchers.Main) {
-                        connectionListeners.forEach { it.onProxyConnected(LOCAL_HOST, LOCAL_PORT) }
+                        connectionListeners.forEach { it.onProxyConnected(LOCAL_HOST, LOCAL_PORT, socksUsername, socksPassword) }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to start proxy", e)
@@ -201,6 +218,9 @@ class VpnProxyManager private constructor(private val context: Context) {
 
     fun getProxyPort(): Int = LOCAL_PORT
 
+    /** The per-session SOCKS5 credentials generated for the currently running proxy, if any. */
+    fun getSocksCredentials(): Pair<String, String> = socksUsername to socksPassword
+
     fun getCurrentConfig(): VpnConfig? =
         (_state.value as? ProxyState.Connected)?.config
 
@@ -226,13 +246,20 @@ class VpnProxyManager private constructor(private val context: Context) {
         controller.startLoop(jsonConfig, LOCAL_PORT)
         coreController = controller
 
-        waitForPort(LOCAL_HOST, LOCAL_PORT, timeoutMs = 3000)
+        if (!waitForPort(LOCAL_HOST, LOCAL_PORT, timeoutMs = 3000)) {
+            // The core came up but never opened its SOCKS port — don't report Connected for a
+            // proxy nothing can actually reach. Tear it down so callers get an Error state and
+            // can retry, instead of a UI that says "Connected" while every request fails.
+            try { controller.stopLoop() } catch (_: Exception) {}
+            coreController = null
+            throw Exception("xray core did not open SOCKS port $LOCAL_PORT within timeout")
+        }
 
         tryStartForegroundService(config)
         startWatchdog()
     }
 
-    private fun waitForPort(host: String, port: Int, timeoutMs: Int) {
+    private fun waitForPort(host: String, port: Int, timeoutMs: Int): Boolean {
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < timeoutMs) {
             try {
@@ -240,12 +267,13 @@ class VpnProxyManager private constructor(private val context: Context) {
                     socket.connect(java.net.InetSocketAddress(host, port), 500)
                 }
                 Log.d(TAG, "Port $port is ready")
-                return
+                return true
             } catch (_: Exception) {
                 Thread.sleep(200)
             }
         }
-        Log.w(TAG, "Port $port not ready after ${timeoutMs}ms, proceeding anyway")
+        Log.w(TAG, "Port $port not ready after ${timeoutMs}ms")
+        return false
     }
 
     private var watchdogJob: Job? = null
@@ -282,13 +310,6 @@ class VpnProxyManager private constructor(private val context: Context) {
     private fun stopWatchdog() {
         watchdogJob?.cancel()
         watchdogJob = null
-    }
-
-    // ─────────────────────────── I/O ─────────────────────────────
-
-    private fun writeConfigFile(json: String) {
-        val configDir = File(context.filesDir, "xray").apply { mkdirs() }
-        File(configDir, "config.json").writeText(json)
     }
 
     // ─────────────────────── Service lifecycle ───────────────────

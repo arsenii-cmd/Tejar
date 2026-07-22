@@ -109,6 +109,56 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
     }
 
     @Override
+    public boolean isCustomUpdate() {
+        return true;
+    }
+
+    @Override
+    public BetaUpdate getUpdate() {
+        return GithubUpdaterController.getInstance().getUpdate();
+    }
+
+    @Override
+    public void checkUpdate(boolean force, Runnable whenDone) {
+        GithubUpdaterController.getInstance().checkForUpdate(force, whenDone);
+    }
+
+    @Override
+    public void downloadUpdate() {
+        GithubUpdaterController.getInstance().downloadUpdate();
+    }
+
+    @Override
+    public void cancelDownloadingUpdate() {
+        GithubUpdaterController.getInstance().cancelDownloadingUpdate();
+    }
+
+    @Override
+    public boolean isDownloadingUpdate() {
+        return GithubUpdaterController.getInstance().isDownloading();
+    }
+
+    @Override
+    public float getDownloadingUpdateProgress() {
+        return GithubUpdaterController.getInstance().getDownloadingProgress();
+    }
+
+    @Override
+    public File getDownloadedUpdateFile() {
+        return GithubUpdaterController.getInstance().getDownloadedFile();
+    }
+
+    @Override
+    public boolean showCustomUpdateAppPopup(Context context, BetaUpdate update, int account) {
+        try {
+            (new UpdateAppAlertDialog(context, update, account)).show();
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return true;
+    }
+
+    @Override
     public IUpdateLayout takeUpdateLayout(Activity activity, ViewGroup sideMenuContainer) {
         return new UpdateLayout(activity, sideMenuContainer);
     }
