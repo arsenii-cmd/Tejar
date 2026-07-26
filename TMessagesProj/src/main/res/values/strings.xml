@@ -12,6 +12,8 @@
     <string name="SettingsUpdateDownloading">Downloading… %1$d%%</string>
     <string name="SettingsBasedOnTelegram">Based on Telegram v%1$s</string>
     <string name="SettingsUpdateDownloadingNotification">Downloading Tejar update…</string>
+    <string name="SettingsUpdateAvailableTitle">Tejar update available</string>
+    <string name="SettingsUpdateAvailableText">Version %1$s is ready to download</string>
     <string name="LanguageName">English</string>
     <string name="English">English</string>
     <string name="LanguageNameInEnglish">English</string>

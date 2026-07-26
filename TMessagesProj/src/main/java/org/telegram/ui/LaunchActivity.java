@@ -1565,7 +1565,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         long push_topic_id = 0;
         int push_enc_id = 0;
         int push_msg_id = 0;
-        int open_settings = 0;
+        int open_settings = intent.getIntExtra("open_settings", 0);
         int open_widget_edit = -1;
         int open_widget_edit_type = -1;
         int open_new_dialog = 0;

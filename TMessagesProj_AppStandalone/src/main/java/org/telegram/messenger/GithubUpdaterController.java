@@ -167,6 +167,16 @@ public class GithubUpdaterController {
             .execute(RELEASES_URL);
     }
 
+    /** True while a discovered release hasn't been announced to the user yet. */
+    public boolean shouldNotifyAboutUpdate() {
+        if (version == null || versionCode == 0) return false;
+        return getSharedPreferences().getInt("notifiedVersionCode", 0) != versionCode;
+    }
+
+    public void setUpdateNotified() {
+        getSharedPreferences().edit().putInt("notifiedVersionCode", versionCode).apply();
+    }
+
     public BetaUpdate getUpdate() {
         if (version == null || versionCode == 0) return null;
         return new BetaUpdate(version, versionCode, changelog);

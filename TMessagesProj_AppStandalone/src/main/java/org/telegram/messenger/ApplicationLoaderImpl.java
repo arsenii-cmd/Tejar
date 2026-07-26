@@ -20,6 +20,7 @@ import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.TL_smsjobs;
 import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.ActionBar.AlertDialog;
+import org.telegram.ui.AboutAppActivity;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.Components.AlertsCreator;
 import org.telegram.ui.Components.BulletinFactory;
@@ -34,6 +35,12 @@ import org.telegram.ui.SMSSubscribeSheet;
 import java.io.File;
 
 public class ApplicationLoaderImpl extends ApplicationLoader {
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        UpdateCheckJobService.schedule(this);
+    }
+
     @Override
     protected String onGetApplicationId() {
         return BuildConfig.APPLICATION_ID;
@@ -326,6 +333,9 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
 
     @Override
     public BaseFragment openSettings(int n) {
+        if (n == UpdateCheckJobService.OPEN_SETTINGS_ABOUT_APP) {
+            return new AboutAppActivity();
+        }
         if (n == 13) {
             if (SMSJobController.getInstance(UserConfig.selectedAccount).getState() == SMSJobController.STATE_JOINED) {
                 return new SMSStatsActivity();
