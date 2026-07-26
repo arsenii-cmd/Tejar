@@ -7,6 +7,7 @@
 -keep class org.webrtc.audio.* { *; }
 -keep class org.webrtc.voiceengine.* { *; }
 -keep class org.telegram.messenger.* { *; }
+-keep class org.telegram.ui.web.HttpGetTask { *; }
 -keep class org.telegram.messenger.camera.* { *; }
 -keep class org.telegram.messenger.secretmedia.* { *; }
 -keep class org.telegram.messenger.support.* { *; }

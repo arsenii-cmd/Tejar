@@ -130,6 +130,7 @@ android {
 
         buildConfigField "int", "TG_APP_ID", getProps("APP_ID") ?: "0"
         buildConfigField "String", "TG_APP_HASH", "\"" + (getProps("APP_HASH") ?: "") + "\""
+        buildConfigField "String", "TELEGRAM_BASE_VERSION", "\"" + APP_VERSION_NAME + "\""
 
         externalNativeBuild {
             cmake {

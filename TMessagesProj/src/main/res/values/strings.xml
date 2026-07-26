@@ -2,6 +2,16 @@
 <resources>
     <string name="AppName">Tejar</string>
     <string name="AppNameBeta">Tejar Beta</string>
+    <string name="SettingsAboutApp">About app</string>
+    <string name="SettingsAppVersion">v%1$s (%2$d)</string>
+    <string name="SettingsGithubReleases">GitHub Releases</string>
+    <string name="SettingsCheckForUpdate">Check for update</string>
+    <string name="SettingsUpToDate">You have the latest version</string>
+    <string name="SettingsUpdateVersionAvailable">Version %1$s available</string>
+    <string name="SettingsUpdateNow">Update</string>
+    <string name="SettingsUpdateDownloading">Downloading… %1$d%%</string>
+    <string name="SettingsBasedOnTelegram">Based on Telegram v%1$s</string>
+    <string name="SettingsUpdateDownloadingNotification">Downloading Tejar update…</string>
     <string name="LanguageName">English</string>
     <string name="English">English</string>
     <string name="LanguageNameInEnglish">English</string>
@@ -2757,8 +2767,8 @@
     <string name="AuthAnotherClientUrl">This code can be used to allow someone to log in to your Telegram account.\n\nTo confirm Telegram login, please go to Settings &gt; Devices &gt; Scan QR and scan the code.</string>
     <string name="QRCodePermissionNoCameraWithHint">**Telegram** needs camera access so that you can scan QR codes. Tap Settings -> Permissions, and turn **Camera** on.</string>
     <string name="SetProfilePhoto">Set Profile Photo</string>
-    <string name="AppUpdate">Update Telegram</string>
-    <string name="AppUpdateBeta">Update Telegram Beta</string>
+    <string name="AppUpdate">Update Tejar</string>
+    <string name="AppUpdateBeta">Update Tejar Beta</string>
     <string name="AppUpdateVersionAndSize">Version %1$s • %2$s</string>
     <string name="AppBetaUpdateVersion">Version %1$s (%2$s)</string>
     <string name="AppUpdateDownloading">Downloading %1$d%%...</string>

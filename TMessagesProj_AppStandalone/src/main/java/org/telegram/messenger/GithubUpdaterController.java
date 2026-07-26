@@ -174,6 +174,7 @@ public class GithubUpdaterController {
 
     private boolean downloading;
     private float downloadingProgress;
+    private int lastNotifiedPercent = -1;
     private HttpGetFileTask downloadingTask;
 
     public void downloadUpdate() {
@@ -185,6 +186,10 @@ public class GithubUpdaterController {
 
         downloading = true;
         downloadingProgress = 0.0f;
+        lastNotifiedPercent = -1;
+        // Keeps the process alive and exempt from Doze/battery-saver network throttling
+        // while the AsyncTask below runs, so the download survives backgrounding.
+        UpdateDownloadService.start(ApplicationLoader.applicationContext);
         NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateLoading);
 
         downloadingTask = new HttpGetFileTask(
@@ -192,17 +197,20 @@ public class GithubUpdaterController {
                 if (downloadedFile != null && verifySignature(downloadedFile)) {
                     path = downloadedFile.getAbsolutePath();
                     save();
-                } else {
-                    if (downloadedFile != null) {
-                        FileLog.e("GithubUpdaterController: downloaded apk signature mismatch, discarding");
-                        try { downloadedFile.delete(); } catch (Exception ignore) {}
-                    }
+                } else if (downloadedFile != null) {
+                    FileLog.e("GithubUpdaterController: downloaded apk signature mismatch, discarding");
+                    try { downloadedFile.delete(); } catch (Exception ignore) {}
                     version = null;
                     versionCode = 0;
                     apkUrl = null;
                     changelog = null;
                     path = null;
                     save();
+                } else {
+                    // Download failed (network dropped) or was cancelled — that says nothing about
+                    // the release itself, so keep the discovered update and let the user retry.
+                    // Wiping it here would make a flaky connection look like "no update available".
+                    FileLog.e("GithubUpdaterController: update download did not complete, keeping update info for retry");
                 }
                 downloading = false;
                 downloadingProgress = 1.0f;
@@ -210,7 +218,14 @@ public class GithubUpdaterController {
             }),
             progress -> {
                 downloadingProgress = progress;
-                NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateLoading);
+                // HttpGetFileTask reports every 16 KB read, i.e. thousands of times for a ~140 MB
+                // apk. Only wake observers when the visible percentage actually moves, otherwise
+                // the UI thread and the notification manager get flooded (and rate-limited).
+                final int percent = (int) (progress * 100);
+                if (percent != lastNotifiedPercent) {
+                    lastNotifiedPercent = percent;
+                    NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateLoading);
+                }
             }
         ).setOverrideExtension("apk");
         downloadingTask.execute(apkUrl);

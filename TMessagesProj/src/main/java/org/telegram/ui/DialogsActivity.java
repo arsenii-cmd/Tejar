@@ -99,6 +99,7 @@ import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.AnimationNotificationsLocker;
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.BetaUpdate;
 import org.telegram.messenger.BirthdayController;
 import org.telegram.messenger.BotWebViewVibrationEffect;
 import org.telegram.messenger.BuildVars;
@@ -498,6 +499,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     private ValueAnimator contactsAlphaAnimator;
     private ViewPage[] viewPages;
     private ActionBarMenuItem passcodeItem;
+    private ActionBarMenuItem updateMenuItem;
     private ActionBarMenuItem downloadsItem;
     private DownloadProgressIcon downloadProgressIcon;
     private boolean downloadsItemVisible;
@@ -2925,6 +2927,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
             globalObserversGroup.add(NotificationCenter.didSetPasscode);
         }
+        globalObserversGroup.add(NotificationCenter.appUpdateAvailable);
         observersGroup
             .add(NotificationCenter.messagesDeleted)
             .add(NotificationCenter.onDatabaseMigration)
@@ -3267,6 +3270,14 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             proxyMenuSubItem.setTextAndIcon(getString(R.string.MenuProxyTitle), 0, proxyDrawable);
             proxyMenuSubItem.setContentDescription(getString(R.string.ProxySettings));
 
+            updateMenuItem = menu.addItem(5, R.drawable.ic_header_update);
+            updateMenuItem.setContentDescription(getString(R.string.SettingsAboutApp));
+            updateMenuItem.setOnClickListener(v -> presentFragment(new AboutAppActivity()));
+            updateAppUpdateIconState();
+            if (ApplicationLoader.applicationLoaderInstance != null && ApplicationLoader.applicationLoaderInstance.isCustomUpdate()) {
+                ApplicationLoader.applicationLoaderInstance.checkUpdate(false, () -> AndroidUtilities.runOnUIThread(this::updateAppUpdateIconState));
+            }
+
             passcodeItem = menu.addItem(1, R.drawable.outline_header_lock_24);
             passcodeItem.setContentDescription(getString(R.string.AccDescrPasscodeLock));
 
@@ -3516,7 +3527,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 logoDrawable = context.getResources().getDrawable(R.drawable.telegram_logo_2).mutate();
                 logoDrawable.setBounds(0, dp(2), logoDrawable.getIntrinsicWidth(), dp(2) + logoDrawable.getIntrinsicHeight());
                 logoDrawable.setColorFilter(getThemedColor(Theme.key_telegram_color_dialogsLogo), PorterDuff.Mode.MULTIPLY);
-                SpannableStringBuilder ssb = new SpannableStringBuilder(getString(R.string.AppName));
+                SpannableStringBuilder ssb = new SpannableStringBuilder(context.getResources().getString(R.string.AppName));
                 ssb.setSpan(new ImageSpan(logoDrawable), 0, ssb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 actionBar.setTitle(ssb, statusDrawable);
                 updateStatus(UserConfig.getInstance(currentAccount).getCurrentUser(), false);
@@ -7020,6 +7031,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @Override
     public void onResume() {
         super.onResume();
+        updateAppUpdateIconState();
         if (dialogStoriesCell != null) {
             dialogStoriesCell.onResume();
         }
@@ -10865,6 +10877,20 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             updateDialogsHint();
         } else if (id == NotificationCenter.activeAuctionsUpdated) {
             updateDialogsHint();
+        } else if (id == NotificationCenter.appUpdateAvailable) {
+            updateAppUpdateIconState();
+        }
+    }
+
+    private void updateAppUpdateIconState() {
+        if (updateMenuItem == null || ApplicationLoader.applicationLoaderInstance == null) {
+            return;
+        }
+        BetaUpdate update = ApplicationLoader.applicationLoaderInstance.getUpdate();
+        if (update != null) {
+            updateMenuItem.getIconView().setColorFilter(getThemedColor(Theme.key_featuredStickers_addButton));
+        } else {
+            updateMenuItem.getIconView().setColorFilter(getThemedColor(Theme.key_actionBarDefaultIcon));
         }
     }
 
