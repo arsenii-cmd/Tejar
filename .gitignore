@@ -1,0 +1,26 @@
+# Dev docs with secrets (signing keys, credentials) — never commit.
+# Lives in the parent D:\Creativ\TG/docs folder (outside this repo); rule kept here
+# as a safeguard in case the docs are ever moved inside the repo.
+docs/
+DEVELOPMENT.md
+
+# Signing keystores — never commit the real signing key
+*.keystore
+*.keystore.*
+
+.idea/
+.gradle/
+build/
+obj/
+*.iml
+local.properties
+TMessagesProj/.cxx/
+TMessagesProj/jniLibs/
+TMessagesProj/jniRes/
+**/.DS_Store
+TMessagesProj/afat/
+TMessagesProj_App/afat/
+TMessagesProj_AppHockeyApp/afat/
+TMessagesProj_AppStandalone/afat/
+TMessagesProj_AppHuawei/afat/
+TMessagesProj/jni/ffmpeg/build_android

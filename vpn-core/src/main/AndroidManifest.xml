@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Required for foreground service (keeps xray-core alive in background) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- specialUse (not dataSync): dataSync FGS is capped at ~6h/24h on Android 14+,
+         after which the system force-stops it and the in-process xray dies. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Internet access (inherited from app, but declared explicitly for clarity) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required for auto-reconnect: monitoring network changes -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Required for VpnBootReceiver to restore proxy after reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application>
+        <service
+            android:name="com.telegram.vpncore.ProxyForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn_proxy" />
+        </service>
+
+        <receiver
+            android:name="com.telegram.vpncore.VpnBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>
