@@ -32,10 +32,26 @@ import java.util.regex.Pattern;
 public class GithubUpdaterController {
 
     private static final String RELEASES_URL = "https://api.github.com/repos/arsenii-cmd/Tejar/releases/latest";
-    // Tejar-<versionName>-<versionCode>-arm64-standalone.apk
+    // Tejar-<versionName>-<versionCode>-<arm64|armv7>-standalone.apk
+    // A release carries one asset per ABI; pickAbiTag() selects the one this device can install.
     private static final Pattern ASSET_NAME_PATTERN = Pattern.compile(
-        "^Tejar-(.+)-(\\d+)-arm64-standalone\\.apk$"
+        "^Tejar-(.+)-(\\d+)-(arm64|armv7)-standalone\\.apk$"
     );
+
+    /**
+     * ABI tag of the release asset this device can run: "arm64" on 64-bit ARM,
+     * "armv7" otherwise. A 64-bit device running the 32-bit build still reports
+     * arm64-v8a here, so it migrates to the arm64 asset on the next update.
+     */
+    private static String pickAbiTag() {
+        final String[] abis = Build.SUPPORTED_ABIS;
+        if (abis != null) {
+            for (String abi : abis) {
+                if ("arm64-v8a".equals(abi)) return "arm64";
+            }
+        }
+        return "armv7";
+    }
 
     private static GithubUpdaterController instance;
     public static GithubUpdaterController getInstance() {
@@ -121,11 +137,12 @@ public class GithubUpdaterController {
                 String newVersion = null;
                 int newVersionCode = 0;
                 String newApkUrl = null;
+                final String abiTag = pickAbiTag();
                 for (int i = 0; i < assets.length(); i++) {
                     final JSONObject asset = assets.getJSONObject(i);
                     final String name = asset.optString("name", "");
                     final Matcher m = ASSET_NAME_PATTERN.matcher(name);
-                    if (m.matches()) {
+                    if (m.matches() && abiTag.equals(m.group(3))) {
                         newVersion = m.group(1);
                         newVersionCode = Integer.parseInt(m.group(2));
                         newApkUrl = asset.optString("browser_download_url", null);
