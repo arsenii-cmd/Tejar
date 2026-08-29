@@ -5,3 +5,5 @@ include ':TMessagesProj_AppHockeyApp'
 include ':TMessagesProj_AppStandalone'
 include ':TMessagesProj_AppTests'
 include ':vpn-core'
+include ':jlatexmath'
+project(':jlatexmath').projectDir = new File(rootDir, 'TMessagesProj/lib/jlatexmath/jlatexmath')

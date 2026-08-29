@@ -4,11 +4,14 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
 enum class VpnProtocol {
-    VLESS, VMESS, SHADOWSOCKS, TROJAN
+    VLESS, VMESS, SHADOWSOCKS, TROJAN, HYSTERIA2, NAIVE,
+
+    /** Any sing-box outbound type we have no dedicated label for; see [VpnConfig.rawType]. */
+    OTHER
 }
 
 enum class NetworkType {
-    TCP, WS, GRPC, H2, QUIC
+    TCP, WS, GRPC, H2, QUIC, HTTPUPGRADE
 }
 
 enum class SecurityType {
@@ -51,7 +54,27 @@ data class VpnConfig(
     // Shadowsocks specific
     val ssMethod: String = "aes-256-gcm",
 
-    val rawLink: String = ""
+    // Hysteria2 specific
+    val obfsPassword: String = "",  // salamander obfuscation; empty = no obfuscation
+    val upMbps: Int = 0,            // 0 = let the server decide (BBR)
+    val downMbps: Int = 0,
+
+    // Naive / http-CONNECT specific
+    val username: String = "",
+
+    // Accept a server certificate that doesn't validate. Only set from an explicit
+    // allowInsecure/insecure flag in the link — never defaulted on.
+    val allowInsecure: Boolean = false,
+
+    val rawLink: String = "",
+
+    // Set when this config came from a sing-box-format subscription: the server's own
+    // outbound object, verbatim. When present it is used as-is instead of rebuilding the
+    // outbound from the fields above — the panel already generates exactly what the core
+    // expects, so there is nothing for us to get subtly wrong.
+    val rawOutbound: String = "",
+    /** sing-box outbound type as the server named it. Only meaningful with [rawOutbound]. */
+    val rawType: String = ""
 ) : Parcelable {
     val displayName: String get() = name.ifBlank { "$address:$port" }
     val protocolLabel: String get() = when (protocol) {
@@ -59,5 +82,8 @@ data class VpnConfig(
         VpnProtocol.VMESS -> "VMess"
         VpnProtocol.SHADOWSOCKS -> "Shadowsocks"
         VpnProtocol.TROJAN -> "Trojan"
+        VpnProtocol.HYSTERIA2 -> "Hysteria2"
+        VpnProtocol.NAIVE -> "Naive"
+        VpnProtocol.OTHER -> rawType.ifBlank { "Proxy" }
     }
 }

@@ -3,7 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:installLocation="auto">
 
-    <uses-sdk tools:overrideLibrary="go.libv2ray.gojni"/>
+    <uses-sdk tools:overrideLibrary="go.libbox.gojni"/>
 
     <application android:name="org.telegram.messenger.ApplicationLoaderImpl" tools:replace="name">
         <service

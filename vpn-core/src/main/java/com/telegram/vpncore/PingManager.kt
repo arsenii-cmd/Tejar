@@ -11,13 +11,19 @@ object PingManager {
     private const val TAG = "PingManager"
     private const val TIMEOUT_MS = 3000
     private const val UNREACHABLE = Long.MAX_VALUE
+    private const val NOT_MEASURABLE = -1L
 
     data class PingResult(
         val config: VpnConfig,
-        val pingMs: Long       // Long.MAX_VALUE = unreachable
+        val pingMs: Long       // Long.MAX_VALUE = unreachable, -1 = not measurable
     ) {
-        val isReachable: Boolean get() = pingMs != UNREACHABLE
-        val displayPing: String get() = if (isReachable) "${pingMs}ms" else "—"
+        /** True only for an actual measurement — drives auto-connect, so it must not guess. */
+        val isReachable: Boolean get() = pingMs != UNREACHABLE && pingMs != NOT_MEASURABLE
+        val displayPing: String get() = when (pingMs) {
+            NOT_MEASURABLE -> "—"
+            UNREACHABLE -> "—"
+            else -> "${pingMs}ms"
+        }
     }
 
     /**
@@ -30,14 +36,21 @@ object PingManager {
     ): List<PingResult> = coroutineScope {
         val jobs = configs.map { config ->
             async(Dispatchers.IO) {
-                val ping = tcpPing(config.address, config.port)
-                val result = PingResult(config, ping)
+                val result = PingResult(config, measure(config))
                 onProgress?.let { withContext(Dispatchers.Main) { it(result) } }
                 result
             }
         }
+        // Measured servers first, then the unmeasured ones, then the failures: an entry we
+        // could not measure is not known to be down, but it must not outrank a server that
+        // actually answered.
         jobs.awaitAll().sortedWith(
-            compareBy { if (it.isReachable) it.pingMs else Long.MAX_VALUE }
+            compareBy {
+                when (it.pingMs) {
+                    NOT_MEASURABLE -> UNREACHABLE - 1
+                    else -> it.pingMs
+                }
+            }
         )
     }
 
@@ -45,8 +58,18 @@ object PingManager {
      * Pings a single config.
      */
     suspend fun ping(config: VpnConfig): PingResult = withContext(Dispatchers.IO) {
-        PingResult(config, tcpPing(config.address, config.port))
+        PingResult(config, measure(config))
     }
+
+    /**
+     * Hysteria2 runs over QUIC, so a TCP connect to its port says nothing about it — and on
+     * port 443 it succeeds against whatever unrelated TCP listener is there, reporting a
+     * healthy latency for a server that cannot be reached at all. Report "no measurement"
+     * instead of a number that means nothing.
+     */
+    private fun measure(config: VpnConfig): Long =
+        if (config.protocol == VpnProtocol.HYSTERIA2) NOT_MEASURABLE
+        else tcpPing(config.address, config.port)
 
     // ─────────────────── TCP connect timing ──────────────────────
 

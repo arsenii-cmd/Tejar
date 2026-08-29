@@ -123,6 +123,10 @@ AsyncPacketSocket* BasicPacketSocketFactory::CreateClientTcpSocket(
     socket =
         new AsyncHttpsProxySocket(socket, user_agent, proxy_info.address,
                                   proxy_info.username, proxy_info.password);
+  } else if (proxy_info.type == PROXY_SOCKS5) {
+    socket =
+        new AsyncSocksProxySocket(socket, proxy_info.address,
+                                  proxy_info.username, proxy_info.password);
   }
 
   // Assert that at most one TLS option is used.

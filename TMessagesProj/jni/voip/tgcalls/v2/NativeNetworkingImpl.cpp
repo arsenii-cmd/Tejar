@@ -2,6 +2,8 @@
 
 #include "p2p/base/basic_packet_socket_factory.h"
 #include "p2p/client/basic_port_allocator.h"
+#include "rtc_base/crypt_string.h"
+#include "rtc_base/proxy_info.h"
 #include "p2p/base/p2p_transport_channel.h"
 #include "p2p/base/basic_async_resolver_factory.h"
 #include "api/packet_socket_factory.h"
@@ -29,6 +31,46 @@
 namespace tgcalls {
 
 namespace {
+
+// Wraps the proxy password for rtc::ProxyInfo. NetworkManager.cpp has its own
+// copy for the legacy path; this one has internal linkage so the two never clash.
+class NativeProxyCryptStringImpl : public rtc::CryptStringImpl {
+public:
+    NativeProxyCryptStringImpl(std::string const &value) : _value(value) {
+    }
+
+    virtual ~NativeProxyCryptStringImpl() override {
+    }
+
+    virtual size_t GetLength() const override {
+        return _value.size();
+    }
+
+    virtual void CopyTo(char *dest, bool nullterminate) const override {
+        memcpy(dest, _value.data(), _value.size());
+        if (nullterminate) {
+            dest[_value.size()] = 0;
+        }
+    }
+
+    virtual std::string UrlEncode() const override {
+        return _value;
+    }
+
+    virtual CryptStringImpl *Copy() const override {
+        return new NativeProxyCryptStringImpl(_value);
+    }
+
+    virtual void CopyRawTo(std::vector<unsigned char> *dest) const override {
+        dest->resize(_value.size());
+        if (!_value.empty()) {
+            memcpy(dest->data(), _value.data(), _value.size());
+        }
+    }
+
+private:
+    std::string _value;
+};
 
 bool getCustomParameterBool(std::map<std::string, json11::Json> const &parameters, std::string const &name) {
     const auto value = parameters.find(name);
@@ -610,6 +652,19 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
     }
     
     _portAllocator->set_step_delay(cricket::kMinimumStepDelay);
+
+    // Route relay traffic through the configured SOCKS5 proxy. Without this the
+    // allocator hands PROXY_NONE to CreateClientTcpSocket and the TCP reflector
+    // connection goes out directly, ignoring "use proxy for calls" entirely.
+    // Mirrors NetworkManager.cpp (the legacy v1 path), which already does this.
+    if (_proxy) {
+        rtc::ProxyInfo proxyInfo;
+        proxyInfo.type = rtc::ProxyType::PROXY_SOCKS5;
+        proxyInfo.address = rtc::SocketAddress(_proxy->host, _proxy->port);
+        proxyInfo.username = _proxy->login;
+        proxyInfo.password = rtc::CryptString(NativeProxyCryptStringImpl(_proxy->password));
+        _portAllocator->set_proxy("t/1.0", proxyInfo);
+    }
 
     _portAllocator->set_flags(flags);
     _portAllocator->Initialize();

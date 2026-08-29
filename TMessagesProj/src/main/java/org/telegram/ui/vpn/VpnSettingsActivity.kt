@@ -31,7 +31,12 @@ class VpnSettingsActivity : BaseFragment() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private var subscriptionsContainer: LinearLayout? = null
-    private val pingResults = mutableMapOf<String, Long>() // configId -> pingMs
+    /** Set while a measurement is expected to be followed by switching to the fastest server. */
+    private var pendingAutoSelect = false
+    // configId -> latency in ms as measured by the core itself (-1 = no answer).
+    // Seeded from the manager, which restores the last run from disk, so the numbers are
+    // already on screen before a fresh measurement finishes.
+    private var latency: Map<String, Int> = emptyMap()
 
     private lateinit var linkInput: EditText
     private lateinit var statusView: TextView
@@ -76,6 +81,19 @@ class VpnSettingsActivity : BaseFragment() {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedAutoReconnect = prefs.getBoolean(KEY_AUTO_RECONNECT, false)
         manager.autoReconnect = savedAutoReconnect
+
+        latency = manager.latency.value
+        scope.launch {
+            manager.latency.collect { updated ->
+                latency = updated
+                rebuildConfigsList()
+                selectFastestIfRequested(context)
+            }
+        }
+        // Re-measure whenever the screen opens, so the numbers are current rather than
+        // whatever was left from last time. Needs the core running — urlTest dials through
+        // the real outbounds — so when the VPN is off the stored values stay on screen.
+        manager.measureLatency()
 
         actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setTitle("VPN Proxy")
@@ -628,16 +646,40 @@ class VpnSettingsActivity : BaseFragment() {
             info.addView(name)
 
             val detail = TextView(ctx).apply {
-                val pingText = pingResults[config.id]?.let {
-                    if (it == Long.MAX_VALUE) " · ✕" else " · ${it}ms"
-                } ?: ""
-                text = "${config.address}:${config.port}$pingText"
+                text = "${config.address}:${config.port}"
                 setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
                 textSize = 11f
                 maxLines = 1
             }
             info.addView(detail)
             card.addView(info)
+
+            // Latency badge. Kept as its own box rather than appended to the address line so
+            // it stays readable and does not get truncated with a long host name. A server
+            // with no result at all gets no badge — showing "0ms" would read as the fastest
+            // server on the list when in fact it is the one that could not be measured.
+            val delay = latency[config.id]
+            val measured = SingBoxLatency.isMeasured(delay)
+            if (measured || SingBoxLatency.isFailed(delay)) {
+                val color = when {
+                    !measured -> COLOR_RED
+                    delay!! < 800 -> COLOR_GREEN
+                    delay < 1500 -> COLOR_ORANGE
+                    else -> COLOR_RED
+                }
+                card.addView(TextView(ctx).apply {
+                    text = if (measured) "${delay}ms" else "✕"
+                    textSize = 10f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(color)
+                    background = makeRoundRect(dp(6), (color and 0x00FFFFFF) or 0x33000000)
+                    setPadding(dp(8), dp(3), dp(8), dp(3))
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { marginStart = dp(8) }
+                })
+            }
 
             if (isActive) {
                 val activeLabel = TextView(ctx).apply {
@@ -821,39 +863,47 @@ class VpnSettingsActivity : BaseFragment() {
 
                 Toast.makeText(context, "Loaded ${fetched.size} servers", Toast.LENGTH_SHORT).show()
 
-                // Auto-ping after fetch
-                pingSubscription(context, fetched)
+                // Measure right after a fetch and settle on the fastest server.
+                measureLatency(context, autoSelectFastest = true)
             } catch (e: Exception) {
                 Toast.makeText(context, "Failed to fetch: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    private fun pingSubscription(context: Context, configsToPing: List<VpnConfig>) {
-        scope.launch {
-            Toast.makeText(context, "Pinging servers…", Toast.LENGTH_SHORT).show()
-            val results = PingManager.pingAll(configsToPing) { result ->
-                pingResults[result.config.id] = result.pingMs
-                rebuildConfigsList()
-            }
-            pingResults.clear()
-            results.forEach { pingResults[it.config.id] = it.pingMs }
-            rebuildConfigsList()
-
-            // Auto-connect to fastest reachable server
-            val fastest = results.firstOrNull { it.isReachable }
-            if (fastest != null) {
-                repository.setActive(fastest.config.id)
-                repository.setVpnRunning(true)
-                if (manager.isRunning()) manager.stopProxy()
-                manager.startProxy(fastest.config)
-                Toast.makeText(context,
-                    "Connected to ${fastest.config.displayName} (${fastest.displayPing})",
-                    Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(context, "No reachable servers found", Toast.LENGTH_SHORT).show()
-            }
+    /**
+     * Asks the core to measure every server over its real protocol. This replaces the old
+     * TCP probe, which could not say anything true about Hysteria2 (its QUIC port ignores
+     * anything not obfuscated) or NaiveProxy, and on port 443 timed an unrelated listener.
+     *
+     * The measurement runs inside the core, so it needs the tunnel up; with it down the
+     * stored numbers from the last run stay on screen.
+     */
+    private fun measureLatency(context: Context, autoSelectFastest: Boolean = false) {
+        if (!manager.isRunning()) {
+            Toast.makeText(context, "Connect first — servers are measured through the tunnel",
+                Toast.LENGTH_SHORT).show()
+            return
         }
+        pendingAutoSelect = autoSelectFastest
+        Toast.makeText(context, "Measuring servers…", Toast.LENGTH_SHORT).show()
+        manager.measureLatency()
+    }
+
+    /** Switches to the fastest server that answered, once a measurement comes back. */
+    private fun selectFastestIfRequested(context: Context) {
+        if (!pendingAutoSelect) return
+        // Only servers the core actually measured are eligible; an unmeasured one reports 0
+        // and would otherwise be picked as the fastest while being the one that failed.
+        val candidates = configs.filter { SingBoxLatency.isMeasured(latency[it.id]) }
+        val fastest = candidates.minByOrNull { latency[it.id] ?: Int.MAX_VALUE } ?: return
+        pendingAutoSelect = false
+        repository.setActive(fastest.id)
+        repository.setVpnRunning(true)
+        manager.selectServer(fastest)
+        Toast.makeText(context,
+            "Connected to ${fastest.displayName} (${latency[fastest.id]}ms)",
+            Toast.LENGTH_SHORT).show()
     }
 
     private fun rebuildSubscriptionsList(context: Context) {
@@ -933,7 +983,7 @@ class VpnSettingsActivity : BaseFragment() {
                     if (subConfigs.isEmpty()) {
                         Toast.makeText(context, "Update subscription first", Toast.LENGTH_SHORT).show()
                     } else {
-                        pingSubscription(context, subConfigs)
+                        measureLatency(context)
                     }
                 }
             }

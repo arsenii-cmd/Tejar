@@ -46,7 +46,7 @@ android {
 }
 
 dependencies {
-    // xray-core — локальный AAR (libs/libv2ray.aar)
+    // sing-box — локальный AAR (libs/libbox.aar)
     implementation fileTree(dir: 'libs', include: ['*.aar'])
 
     // Encrypted storage for VPN configs

@@ -11,9 +11,10 @@ import java.net.URL
  * Downloads a subscription URL and parses it into a list of [VpnConfig].
  *
  * Supported response formats:
- *  1. Base64-encoded text (one VPN link per line after decode) — standard v2ray/Marzban
- *  2. Plain text (one VPN link per line) — some panels
- *  3. HTML page (Marzban web UI) — extracts vless/vmess/ss/trojan links from HTML
+ *  1. sing-box config document — outbounds are taken verbatim (see [SingBoxSubscriptionParser])
+ *  2. Base64-encoded text (one VPN link per line after decode) — standard v2ray/Marzban
+ *  3. Plain text (one VPN link per line) — some panels
+ *  4. HTML page (Marzban web UI) — extracts vless/vmess/ss/trojan links from HTML
  */
 object SubscriptionFetcher {
 
@@ -21,8 +22,13 @@ object SubscriptionFetcher {
     private const val TIMEOUT_MS = 15_000
     private const val MAX_REDIRECTS = 5
 
-    // User-Agents to try in order — Marzban picks the response format based on UA
+    // User-Agents to try in order — the panel picks the response format from the UA.
+    // "SFA/" comes first deliberately: it selects the sing-box format, which is the one the
+    // panel generates most completely. Its links format silently omits whole protocols
+    // (Naive among them), so a v2rayNG UA gets a subscription missing servers that exist.
+    // The rest stay as fallbacks for panels that don't speak sing-box.
     private val USER_AGENTS = listOf(
+        "SFA/1.11.0",
         "v2rayNG/1.8.0",
         "clash/1.18.0",
         "Mozilla/5.0"   // fallback: get HTML, then extract links
@@ -90,6 +96,12 @@ object SubscriptionFetcher {
     private fun parseSubscription(raw: String): List<VpnConfig> {
         val trimmed = raw.trim()
 
+        // 0. sing-box config document — use the panel's own outbounds instead of re-deriving them
+        if (SingBoxSubscriptionParser.looksLikeSingBoxConfig(trimmed)) {
+            val results = SingBoxSubscriptionParser.parse(trimmed)
+            if (results.isNotEmpty()) return results
+        }
+
         // 1. Try base64 decode first (standard Marzban/v2ray subscription)
         tryBase64Decode(trimmed)?.let { decoded ->
             val results = extractLinksFromText(decoded)
@@ -113,7 +125,15 @@ object SubscriptionFetcher {
         val results = mutableListOf<VpnConfig>()
         for (line in text.lines()) {
             val trimmed = line.trim()
-            if (!looksLikeVpnLink(trimmed)) continue
+            if (!looksLikeVpnLink(trimmed)) {
+                // Unrecognised schemes used to vanish without a trace, which is how the
+                // subscription could carry servers that simply never appeared in the list.
+                // Log the scheme only — everything after "://" is credentials.
+                if (trimmed.contains("://")) {
+                    Log.w(TAG, "Unsupported scheme in subscription: ${trimmed.substringBefore("://")}")
+                }
+                continue
+            }
             try {
                 results.add(LinkParser.parse(trimmed))
             } catch (e: Exception) {
@@ -166,9 +186,19 @@ object SubscriptionFetcher {
         null
     }
 
+    // Must stay in sync with LinkParser.parse — a scheme missing here is dropped before
+    // the parser ever sees it, so the server silently never shows up in the list.
     private fun looksLikeVpnLink(s: String): Boolean =
         s.startsWith("vless://", ignoreCase = true) ||
         s.startsWith("vmess://", ignoreCase = true) ||
         s.startsWith("ss://", ignoreCase = true) ||
-        s.startsWith("trojan://", ignoreCase = true)
+        s.startsWith("trojan://", ignoreCase = true) ||
+        s.startsWith("hysteria2://", ignoreCase = true) ||
+        s.startsWith("hy2://", ignoreCase = true) ||
+        s.startsWith("naive+https://", ignoreCase = true) ||
+        // NaiveProxy as the panel actually emits it: https://user:pass@host:port
+        ((s.startsWith("http://", ignoreCase = true) || s.startsWith("https://", ignoreCase = true)) &&
+            s.substringAfter("://").substringBefore('/').substringBefore('?').let {
+                it.contains('@') && it.substringBefore('@').contains(':')
+            })
 }

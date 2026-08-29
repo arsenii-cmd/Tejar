@@ -11,6 +11,7 @@ DEVELOPMENT.md
 .idea/
 .gradle/
 build/
+.kotlin/
 obj/
 *.iml
 local.properties

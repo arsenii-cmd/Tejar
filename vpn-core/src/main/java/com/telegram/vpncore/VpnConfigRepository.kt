@@ -18,6 +18,7 @@ class VpnConfigRepository(context: Context) {
         private const val KEY_ACTIVE_ID = "active_config_id"
         private const val KEY_VPN_RUNNING = "vpn_running"
         private const val KEY_ENERGY_SAVING = "energy_saving"
+        private const val KEY_LATENCY = "latency"
     }
 
     private val prefs by lazy {
@@ -93,6 +94,28 @@ class VpnConfigRepository(context: Context) {
 
     fun isEnergySaving(): Boolean = prefs.getBoolean(KEY_ENERGY_SAVING, false)
 
+    // ───────────────────────── Latency ───────────────────────────
+    // Persisted so a measurement survives leaving the screen and restarting the app;
+    // keyed by config id, in milliseconds, -1 meaning the server did not answer.
+
+    fun saveLatency(latency: Map<String, Int>) {
+        val obj = JSONObject()
+        latency.forEach { (id, ms) -> obj.put(id, ms) }
+        prefs.edit().putString(KEY_LATENCY, obj.toString()).apply()
+    }
+
+    fun getLatency(): Map<String, Int> {
+        val raw = prefs.getString(KEY_LATENCY, null) ?: return emptyMap()
+        return try {
+            val obj = JSONObject(raw)
+            buildMap {
+                obj.keys().forEach { key -> put(key, obj.getInt(key)) }
+            }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
     // ─────────────────────────── I/O ─────────────────────────────
 
     private fun persist(configs: List<VpnConfig>) {
@@ -127,7 +150,17 @@ class VpnConfigRepository(context: Context) {
         put("shortId", c.shortId)
         put("spiderX", c.spiderX)
         put("ssMethod", c.ssMethod)
+        // Hysteria2 / Naive fields used to be missing here: the link parsed correctly but the
+        // stored copy lost its obfs password and http username, so every config reloaded from
+        // disk dialled without them and the server never answered.
+        put("obfsPassword", c.obfsPassword)
+        put("upMbps", c.upMbps)
+        put("downMbps", c.downMbps)
+        put("username", c.username)
+        put("allowInsecure", c.allowInsecure)
         put("rawLink", c.rawLink)
+        put("rawOutbound", c.rawOutbound)
+        put("rawType", c.rawType)
     }
 
     private fun deserialize(j: JSONObject): VpnConfig = VpnConfig(
@@ -152,6 +185,13 @@ class VpnConfigRepository(context: Context) {
         shortId = j.optString("shortId"),
         spiderX = j.optString("spiderX"),
         ssMethod = j.optString("ssMethod", "aes-256-gcm"),
-        rawLink = j.optString("rawLink")
+        obfsPassword = j.optString("obfsPassword"),
+        upMbps = j.optInt("upMbps", 0),
+        downMbps = j.optInt("downMbps", 0),
+        username = j.optString("username"),
+        allowInsecure = j.optBoolean("allowInsecure", false),
+        rawLink = j.optString("rawLink"),
+        rawOutbound = j.optString("rawOutbound"),
+        rawType = j.optString("rawType")
     )
 }

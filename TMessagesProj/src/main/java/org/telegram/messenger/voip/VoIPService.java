@@ -3424,7 +3424,8 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			final String persistentStateFilePath = new File(ApplicationLoader.applicationContext.getCacheDir(), "voip_persistent_state.json").getAbsolutePath();
 
 			// endpoints
-			final boolean forceTcp = preferences.getBoolean("dbg_force_tcp_in_calls", false);
+			final boolean useProxyForCalls = preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false);
+			final boolean forceTcp = preferences.getBoolean("dbg_force_tcp_in_calls", false) || useProxyForCalls;
 			final int endpointType = forceTcp ? Instance.ENDPOINT_TYPE_TCP_RELAY : Instance.ENDPOINT_TYPE_UDP_RELAY;
 			final Instance.Endpoint[] endpoints = new Instance.Endpoint[privateCall.connections.size()];
 			ArrayList<Long> reflectorIds = new ArrayList<>();
@@ -3451,7 +3452,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 
 			// proxy
 			Instance.Proxy proxy = null;
-			if (preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false)) {
+			if (useProxyForCalls) {
 				final String server = preferences.getString("proxy_ip", null);
 				final String secret = preferences.getString("proxy_secret", null);
 				if (!TextUtils.isEmpty(server) && TextUtils.isEmpty(secret)) {

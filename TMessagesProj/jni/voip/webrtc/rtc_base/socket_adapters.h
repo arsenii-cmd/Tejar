@@ -137,6 +137,50 @@ class AsyncHttpsProxySocket : public BufferedReadAdapter {
   std::string unknown_mechanisms_;
 };
 
+// Implements a socket adapter that speaks the SOCKS5 proxy protocol (CONNECT
+// with optional username/password auth). Telegram's stock WebRTC ships only the
+// HTTPS-proxy adapter; this restores the SOCKS5 path so VoIP calls can tunnel
+// through the local xray SOCKS5 proxy (127.0.0.1:10808).
+class AsyncSocksProxySocket : public BufferedReadAdapter {
+ public:
+  AsyncSocksProxySocket(Socket* socket,
+                        const SocketAddress& proxy,
+                        absl::string_view username,
+                        const CryptString& password);
+  ~AsyncSocksProxySocket() override;
+
+  AsyncSocksProxySocket(const AsyncSocksProxySocket&) = delete;
+  AsyncSocksProxySocket& operator=(const AsyncSocksProxySocket&) = delete;
+
+  int Connect(const SocketAddress& addr) override;
+  SocketAddress GetRemoteAddress() const override;
+  int Close() override;
+  ConnState GetState() const override;
+
+ protected:
+  void OnConnectEvent(Socket* socket) override;
+  void OnCloseEvent(Socket* socket, int err) override;
+  void ProcessInput(char* data, size_t* len) override;
+
+ private:
+  void SendGreeting();
+  void SendAuth();
+  void SendConnect();
+  void Error(int error);
+
+  SocketAddress proxy_, dest_;
+  std::string user_;
+  CryptString pass_;
+  enum SocksState {
+    SS_INIT,
+    SS_GREETING,
+    SS_AUTH,
+    SS_CONNECT,
+    SS_TUNNEL,
+    SS_ERROR
+  } state_;
+};
+
 }  // namespace rtc
 
 #endif  // RTC_BASE_SOCKET_ADAPTERS_H_

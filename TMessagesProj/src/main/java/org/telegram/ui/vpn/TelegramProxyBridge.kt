@@ -12,6 +12,11 @@ object TelegramProxyBridge {
 
     fun enableProxy(host: String, port: Int, username: String, password: String) {
         try {
+            SharedConfig.loadProxyList()
+            // Drop any previous VPN-proxy entries for this host:port (ignoring creds) so the
+            // auto-managed VPN proxy never accumulates duplicates in the proxy list.
+            SharedConfig.proxyList.removeAll { it.address == host && it.port == port }
+
             val proxyInfo = SharedConfig.ProxyInfo(host, port, username, password, "")
             SharedConfig.addProxy(proxyInfo)
             SharedConfig.currentProxy = proxyInfo

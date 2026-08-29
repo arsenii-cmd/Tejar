@@ -14,6 +14,10 @@ import java.nio.charset.StandardCharsets
  *  - SS:     ss://BASE64(method:password)@host:port#name
  *             or ss://BASE64(method:password@host:port)#name (legacy)
  *  - Trojan: trojan://password@host:port?sni=...#name
+ *  - Hy2:    hysteria2://password@host:port?obfs=salamander&obfs-password=...&sni=...#name
+ *             (hy2:// is accepted as an alias)
+ *  - Naive:  https://user:password@host:port?sni=...#name  (the panel emits a plain
+ *             http/https scheme, not naive+https; "naive+https://" is also accepted)
  */
 object LinkParser {
 
@@ -27,6 +31,10 @@ object LinkParser {
             trimmed.startsWith("vmess://", ignoreCase = true) -> parseVmess(trimmed)
             trimmed.startsWith("ss://", ignoreCase = true) -> parseShadowsocks(trimmed)
             trimmed.startsWith("trojan://", ignoreCase = true) -> parseTrojan(trimmed)
+            trimmed.startsWith("hysteria2://", ignoreCase = true) -> parseHysteria2(trimmed)
+            trimmed.startsWith("hy2://", ignoreCase = true) -> parseHysteria2(trimmed)
+            trimmed.startsWith("naive+https://", ignoreCase = true) -> parseNaive(trimmed)
+            isHttpProxyLink(trimmed) -> parseNaive(trimmed)
             else -> throw IllegalArgumentException("Unsupported protocol scheme: ${trimmed.substringBefore("://")}")
         }
     }
@@ -215,12 +223,95 @@ object LinkParser {
         )
     }
 
+    // ───────────────────────── Hysteria2 ──────────────────────────
+
+    private fun parseHysteria2(link: String): VpnConfig {
+        // hysteria2://password@host:port?params#name
+        val uri = Uri.parse(link)
+        val password = uri.userInfo ?: throw IllegalArgumentException("Hysteria2: missing password")
+        val host = uri.host ?: throw IllegalArgumentException("Hysteria2: missing host")
+        // Hysteria2 defaults to 443 when the link omits the port.
+        val port = uri.port.takeIf { it in 1..65535 } ?: 443
+        val name = uri.fragment ?: ""
+
+        // Obfuscation is optional and only "salamander" exists today; an obfs password
+        // without obfs=salamander is meaningless, so both must be present.
+        val obfsType = uri.getQueryParameter("obfs") ?: ""
+        val obfsPassword = if (obfsType.equals("salamander", ignoreCase = true)) {
+            uri.getQueryParameter("obfs-password") ?: ""
+        } else ""
+
+        return VpnConfig(
+            name = name,
+            protocol = VpnProtocol.HYSTERIA2,
+            address = host,
+            port = port,
+            password = password,
+            obfsPassword = obfsPassword,
+            upMbps = uri.getQueryParameter("up")?.toIntOrNull() ?: 0,
+            downMbps = uri.getQueryParameter("down")?.toIntOrNull() ?: 0,
+            security = SecurityType.TLS,
+            sni = uri.getQueryParameter("sni") ?: "",
+            allowInsecure = uri.isInsecure(),
+            rawLink = link
+        )
+    }
+
+    // ─────────────────────────── Naive ────────────────────────────
+
+    /**
+     * True for an http/https link carrying `user:password@` — that's how the panel ships
+     * NaiveProxy (http-CONNECT) entries. Requiring credentials keeps a bare subscription
+     * URL from being mistaken for a proxy.
+     */
+    private fun isHttpProxyLink(link: String): Boolean {
+        if (!link.startsWith("http://", true) && !link.startsWith("https://", true)) return false
+        val authority = link.substringAfter("://").substringBefore('/').substringBefore('?')
+        val userInfo = authority.substringBefore('@', "")
+        return authority.contains('@') && userInfo.contains(':')
+    }
+
+    private fun parseNaive(link: String): VpnConfig {
+        // https://user:password@host:port?sni=...#name  (or naive+https:// / http://)
+        // Uri.parse chokes on the '+' in the scheme, so normalise it away first.
+        val body = link.substring(link.indexOf("://") + 3)
+        val plaintext = link.startsWith("http://", ignoreCase = true)
+        val uri = Uri.parse("https://" + body)
+        val host = uri.host ?: throw IllegalArgumentException("Naive: missing host")
+        val port = uri.port.takeIf { it in 1..65535 } ?: 443
+        val userInfo = uri.userInfo ?: throw IllegalArgumentException("Naive: missing credentials")
+        val username = userInfo.substringBefore(':')
+        val password = userInfo.substringAfter(':', "")
+        if (password.isEmpty()) throw IllegalArgumentException("Naive: missing password")
+
+        return VpnConfig(
+            name = uri.fragment ?: "",
+            protocol = VpnProtocol.NAIVE,
+            address = host,
+            port = port,
+            username = username,
+            password = password,
+            // Plain http:// means the panel has TLS off for this host.
+            security = if (plaintext) SecurityType.NONE else SecurityType.TLS,
+            sni = uri.getQueryParameter("sni") ?: "",
+            allowInsecure = uri.isInsecure(),
+            rawLink = link
+        )
+    }
+
     // ───────────────────────── Helpers ────────────────────────────
+
+    /** True only when the link explicitly asks to skip certificate validation. */
+    private fun Uri.isInsecure(): Boolean {
+        val raw = getQueryParameter("insecure") ?: getQueryParameter("allowInsecure") ?: return false
+        return raw == "1" || raw.equals("true", ignoreCase = true)
+    }
 
     private fun String.toNetworkType(): NetworkType = when (lowercase()) {
         "ws" -> NetworkType.WS
         "grpc" -> NetworkType.GRPC
         "h2", "http" -> NetworkType.H2
+        "httpupgrade" -> NetworkType.HTTPUPGRADE
         "quic" -> NetworkType.QUIC
         else -> NetworkType.TCP
     }

@@ -469,4 +469,222 @@ void AsyncHttpsProxySocket::Error(int error) {
   SignalCloseEvent(this, error);
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
+AsyncSocksProxySocket::AsyncSocksProxySocket(Socket* socket,
+                                             const SocketAddress& proxy,
+                                             absl::string_view username,
+                                             const CryptString& password)
+    : BufferedReadAdapter(socket, 1024),
+      proxy_(proxy),
+      user_(username),
+      pass_(password),
+      state_(SS_INIT) {}
+
+AsyncSocksProxySocket::~AsyncSocksProxySocket() {}
+
+int AsyncSocksProxySocket::Connect(const SocketAddress& addr) {
+  RTC_LOG(LS_VERBOSE) << "AsyncSocksProxySocket::Connect("
+                      << proxy_.ToSensitiveString() << ")";
+  dest_ = addr;
+  state_ = SS_INIT;
+  BufferInput(true);
+  return BufferedReadAdapter::Connect(proxy_);
+}
+
+SocketAddress AsyncSocksProxySocket::GetRemoteAddress() const {
+  return dest_;
+}
+
+int AsyncSocksProxySocket::Close() {
+  state_ = SS_ERROR;
+  dest_.Clear();
+  return BufferedReadAdapter::Close();
+}
+
+Socket::ConnState AsyncSocksProxySocket::GetState() const {
+  if (state_ < SS_TUNNEL) {
+    return CS_CONNECTING;
+  } else if (state_ == SS_TUNNEL) {
+    return CS_CONNECTED;
+  } else {
+    return CS_CLOSED;
+  }
+}
+
+void AsyncSocksProxySocket::OnConnectEvent(Socket* socket) {
+  SendGreeting();
+}
+
+void AsyncSocksProxySocket::OnCloseEvent(Socket* socket, int err) {
+  BufferedReadAdapter::OnCloseEvent(socket, err);
+}
+
+void AsyncSocksProxySocket::SendGreeting() {
+  // VER=5, NMETHODS=2, methods: 0x00 (no auth), 0x02 (username/password).
+  const char greeting[4] = {5, 2, 0, 2};
+  DirectSend(greeting, sizeof(greeting));
+  state_ = SS_GREETING;
+}
+
+void AsyncSocksProxySocket::SendAuth() {
+  std::vector<unsigned char> passBytes;
+  pass_.CopyRawTo(&passBytes);
+  std::string auth;
+  auth.reserve(3 + std::min<size_t>(user_.size(), 255) +
+               std::min<size_t>(passBytes.size(), 255));
+  auth.push_back(1);  // auth version
+  auth.push_back(static_cast<char>(std::min<size_t>(user_.size(), 255)));
+  auth.append(user_, 0, std::min<size_t>(user_.size(), 255));
+  auth.push_back(static_cast<char>(std::min<size_t>(passBytes.size(), 255)));
+  auth.append(reinterpret_cast<const char*>(passBytes.data()),
+              std::min<size_t>(passBytes.size(), 255));
+  DirectSend(auth.c_str(), auth.size());
+  state_ = SS_AUTH;
+}
+
+void AsyncSocksProxySocket::SendConnect() {
+  const IPAddress& ip = dest_.ipaddr();
+  uint16_t port = static_cast<uint16_t>(dest_.port());
+  if (ip.family() == AF_INET) {
+    in_addr addr = ip.ipv4_address();
+    char req[10];
+    req[0] = 5;  // VER
+    req[1] = 1;  // CMD = CONNECT
+    req[2] = 0;  // RSV
+    req[3] = 1;  // ATYP = IPv4
+    memcpy(req + 4, &addr.s_addr, 4);
+    req[8] = static_cast<char>((port >> 8) & 0xFF);
+    req[9] = static_cast<char>(port & 0xFF);
+    DirectSend(req, sizeof(req));
+  } else if (ip.family() == AF_INET6) {
+    in6_addr addr = ip.ipv6_address();
+    char req[22];
+    req[0] = 5;
+    req[1] = 1;
+    req[2] = 0;
+    req[3] = 4;  // ATYP = IPv6
+    memcpy(req + 4, addr.s6_addr, 16);
+    req[20] = static_cast<char>((port >> 8) & 0xFF);
+    req[21] = static_cast<char>(port & 0xFF);
+    DirectSend(req, sizeof(req));
+  } else {
+    // ATYP = domain name (unresolved hostname).
+    const std::string& host = dest_.hostname();
+    std::string req;
+    req.reserve(7 + std::min<size_t>(host.size(), 255));
+    req.push_back(5);
+    req.push_back(1);
+    req.push_back(0);
+    req.push_back(3);  // ATYP = domain
+    req.push_back(static_cast<char>(std::min<size_t>(host.size(), 255)));
+    req.append(host, 0, std::min<size_t>(host.size(), 255));
+    req.push_back(static_cast<char>((port >> 8) & 0xFF));
+    req.push_back(static_cast<char>(port & 0xFF));
+    DirectSend(req.c_str(), req.size());
+  }
+  state_ = SS_CONNECT;
+}
+
+void AsyncSocksProxySocket::ProcessInput(char* data, size_t* len) {
+  size_t pos = 0;
+  while (pos < *len && state_ < SS_TUNNEL) {
+    if (state_ == SS_GREETING) {
+      // Expect VER(1) + METHOD(1).
+      if (*len - pos < 2) {
+        break;
+      }
+      uint8_t ver = static_cast<uint8_t>(data[pos]);
+      uint8_t method = static_cast<uint8_t>(data[pos + 1]);
+      pos += 2;
+      if (ver != 5) {
+        Error(0);
+        return;
+      }
+      if (method == 0) {
+        SendConnect();
+      } else if (method == 2) {
+        SendAuth();
+      } else {
+        Error(0);
+        return;
+      }
+    } else if (state_ == SS_AUTH) {
+      // Expect VER(1) + STATUS(1).
+      if (*len - pos < 2) {
+        break;
+      }
+      uint8_t ver = static_cast<uint8_t>(data[pos]);
+      uint8_t status = static_cast<uint8_t>(data[pos + 1]);
+      pos += 2;
+      if (ver != 1 || status != 0) {
+        Error(SOCKET_EACCES);
+        return;
+      }
+      SendConnect();
+    } else if (state_ == SS_CONNECT) {
+      // Expect VER(1) + REP(1) + RSV(1) + ATYP(1) + BND.ADDR + BND.PORT.
+      if (*len - pos < 4) {
+        break;
+      }
+      uint8_t ver = static_cast<uint8_t>(data[pos]);
+      uint8_t rep = static_cast<uint8_t>(data[pos + 1]);
+      uint8_t atyp = static_cast<uint8_t>(data[pos + 3]);
+      size_t addrLen;
+      if (atyp == 1) {
+        addrLen = 4;
+      } else if (atyp == 4) {
+        addrLen = 16;
+      } else if (atyp == 3) {
+        if (*len - pos < 5) {
+          break;  // need the domain length byte too
+        }
+        addrLen = 1 + static_cast<uint8_t>(data[pos + 4]);
+      } else {
+        Error(0);
+        return;
+      }
+      if (*len - pos < 4 + addrLen + 2) {
+        break;  // wait for the full response
+      }
+      pos += 4 + addrLen + 2;  // consume header + addr + port
+      if (ver != 5 || rep != 0) {
+        Error(0);
+        return;
+      }
+      state_ = SS_TUNNEL;
+      break;
+    } else {
+      // SS_INIT: the proxy sent data before we greeted it. No branch would
+      // consume anything here, so without this the loop would spin forever on
+      // the network thread (pos never advances, state_ stays < SS_TUNNEL).
+      Error(0);
+      return;
+    }
+  }
+
+  *len -= pos;
+  if (pos > 0 && *len > 0) {
+    memmove(data, data + pos, *len);
+  }
+
+  if (state_ != SS_TUNNEL) {
+    return;
+  }
+
+  bool remainder = (*len > 0);
+  BufferInput(false);
+  SignalConnectEvent(this);
+  if (remainder) {
+    SignalReadEvent(this);
+  }
+}
+
+void AsyncSocksProxySocket::Error(int error) {
+  BufferInput(false);
+  Close();
+  SetError(error);
+  SignalCloseEvent(this, error);
+}
+
 }  // namespace rtc

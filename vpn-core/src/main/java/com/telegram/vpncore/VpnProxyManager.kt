@@ -15,13 +15,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import libv2ray.CoreCallbackHandler
-import libv2ray.CoreController
-import libv2ray.Libv2ray
+import io.nekohasekai.libbox.CommandServer
+import io.nekohasekai.libbox.Libbox
+import io.nekohasekai.libbox.OverrideOptions
+import io.nekohasekai.libbox.SetupOptions
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Manages the embedded xray-core (via AndroidLibXrayLite) SOCKS5 proxy.
+ * Manages the embedded sing-box SOCKS5 proxy (via libbox).
  *
  * Usage:
  *   VpnProxyManager.getInstance(context).startProxy(config)
@@ -76,20 +77,57 @@ class VpnProxyManager private constructor(private val context: Context) {
         connectionListeners.remove(listener)
     }
 
-    private var coreController: CoreController? = null
+    // The core is started with every known server as its own outbound, so the list is read
+    // here rather than passed in: a caller that only knows the server it wants would
+    // otherwise silently drop the rest and make measurements impossible.
+    private val configRepository by lazy { VpnConfigRepository(context) }
+
+    private var commandServer: CommandServer? = null
+
+    /**
+     * Latency per server, keyed by [VpnConfig.id], as measured by the core itself.
+     * Read the values through [SingBoxLatency]: they are unsigned, so 0 means "no result"
+     * rather than "instant". Restored from disk, so it is populated before the first
+     * [measureLatency] of a session finishes.
+     */
+    private val _latency = MutableStateFlow(runCatching { configRepository.getLatency() }.getOrDefault(emptyMap()))
+    val latency: StateFlow<Map<String, Int>> = _latency
+
+    private val commandClient by lazy {
+        SingBoxCommandClient(scope) { delays ->
+            // Keep previously measured servers: a run only reports what it retested, and a
+            // number vanishing from the list would look like the measurement was lost.
+            val merged = _latency.value + delays
+            _latency.value = merged
+            runCatching { configRepository.saveLatency(merged) }
+        }
+    }
+
+    @Volatile
+    private var coreSetupDone = false
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mutex = Mutex()
 
-    // Regenerated on every startProxy() — random per-session SOCKS5 credentials so other apps
-    // on the device can't use the local proxy just by knowing the well-known loopback port.
-    @Volatile
-    private var socksUsername: String = ""
-    @Volatile
-    private var socksPassword: String = ""
+    // Per-install stable SOCKS5 credentials (generated once, persisted). Stable credentials let
+    // TelegramProxyBridge.enableProxy() -> SharedConfig.addProxy() deduplicate the VPN proxy by
+    // (address, port, username, password). Regenerating them on every startProxy() made that
+    // dedup never match and appended a fresh 127.0.0.1:10808 entry on every reconnect,
+    // growing the proxy list without bound.
+    private val socksPrefs = context.getSharedPreferences("vpn_socks", Context.MODE_PRIVATE)
 
-    private fun generateSocksCredentials() {
-        socksUsername = randomToken()
-        socksPassword = randomToken()
+    @Volatile
+    private var socksUsername: String = loadOrCreateToken("socks_user")
+    @Volatile
+    private var socksPassword: String = loadOrCreateToken("socks_pass")
+
+    private fun loadOrCreateToken(key: String): String {
+        val existing = socksPrefs.getString(key, null)
+        if (!existing.isNullOrEmpty()) {
+            return existing
+        }
+        val token = randomToken()
+        socksPrefs.edit().putString(key, token).apply()
+        return token
     }
 
     private fun randomToken(): String {
@@ -154,9 +192,11 @@ class VpnProxyManager private constructor(private val context: Context) {
                 }
                 _state.emit(ProxyState.Connecting)
                 try {
-                    generateSocksCredentials()
-                    val jsonConfig = XrayConfigGenerator.generate(config, LOCAL_PORT, socksUsername, socksPassword)
-                    startXray(jsonConfig, config)
+                    val servers = allServersIncluding(config)
+                    val jsonConfig = SingBoxConfigGenerator.generate(
+                        servers, config.id, LOCAL_PORT, socksUsername, socksPassword
+                    )
+                    startCore(jsonConfig, config)
                     lastConnectedConfig = config
                     _state.emit(ProxyState.Connected(config))
                     Log.d(TAG, "Proxy started on $LOCAL_HOST:$LOCAL_PORT")
@@ -198,8 +238,12 @@ class VpnProxyManager private constructor(private val context: Context) {
     private suspend fun stopProxyInternal() {
         try {
             stopWatchdog()
-            coreController?.stopLoop()
-            coreController = null
+            commandServer?.let { server ->
+                try { server.closeService() } catch (_: Exception) {}
+                try { server.close() } catch (_: Exception) {}
+            }
+            commandServer = null
+            commandClient.disconnect()
             stopForegroundService()
             _state.emit(ProxyState.Idle)
             Log.d(TAG, "Proxy stopped")
@@ -210,6 +254,38 @@ class VpnProxyManager private constructor(private val context: Context) {
         withContext(Dispatchers.Main) {
             connectionListeners.forEach { it.onProxyDisconnected() }
         }
+    }
+
+    /**
+     * Every stored server, with [selected] guaranteed present — a config can be started
+     * before it has been saved (a freshly parsed link), and leaving it out would produce a
+     * selector whose default does not exist.
+     */
+    private fun allServersIncluding(selected: VpnConfig): List<VpnConfig> {
+        val stored = runCatching { configRepository.getAll() }.getOrDefault(emptyList())
+        return if (stored.any { it.id == selected.id }) stored else stored + selected
+    }
+
+    /**
+     * Measures every server through its own protocol. Results land in [latency]; the call
+     * returns immediately because the core reports them asynchronously.
+     */
+    fun measureLatency() {
+        if (!isRunning()) return
+        commandClient.urlTest(SingBoxConfigGenerator.GROUP_TAG)
+    }
+
+    /**
+     * Switches to [config]. While the core is running this is a selector change, which keeps
+     * the tunnel up; otherwise it falls back to starting the core on that server.
+     */
+    fun selectServer(config: VpnConfig) {
+        if (isRunning() && commandClient.selectOutbound(SingBoxConfigGenerator.GROUP_TAG, config.id)) {
+            _state.value = ProxyState.Connected(config)
+            lastConnectedConfig = config
+            return
+        }
+        startProxy(config)
     }
 
     fun isRunning(): Boolean = _state.value is ProxyState.Connected
@@ -224,35 +300,54 @@ class VpnProxyManager private constructor(private val context: Context) {
     fun getCurrentConfig(): VpnConfig? =
         (_state.value as? ProxyState.Connected)?.config
 
-    // ─────────────────────────── xray ────────────────────────────
+    // ───────────────────────── sing-box ──────────────────────────
 
-    private fun startXray(jsonConfig: String, config: VpnConfig) {
-        val controller = Libv2ray.newCoreController(object : CoreCallbackHandler {
-            override fun onEmitStatus(level: Long, msg: String): Long {
-                Log.d(TAG, "xray[$level]: $msg")
-                return 0
-            }
-
-            override fun startup(): Long {
-                return 0
-            }
-
-            override fun shutdown(): Long {
-                stopProxy()
-                return 0
-            }
+    /** One-time libbox setup; safe to call repeatedly, only the first call does work. */
+    private fun ensureCoreSetup() {
+        if (coreSetupDone) return
+        val base = context.filesDir.resolve("singbox").apply { mkdirs() }
+        val work = base.resolve("work").apply { mkdirs() }
+        val temp = context.cacheDir.resolve("singbox").apply { mkdirs() }
+        Libbox.setup(SetupOptions().apply {
+            basePath = base.absolutePath
+            workingPath = work.absolutePath
+            tempPath = temp.absolutePath
         })
+        coreSetupDone = true
+    }
 
-        controller.startLoop(jsonConfig, LOCAL_PORT)
-        coreController = controller
+    private fun startCore(jsonConfig: String, config: VpnConfig) {
+        ensureCoreSetup()
+
+        // Fail before touching the core if the config can't be parsed — the error message
+        // from checkConfig names the offending field, which a start failure does not.
+        Libbox.checkConfig(jsonConfig)
+
+        val server = CommandServer(
+            TejarCommandServerHandler(onServiceStop = { stopProxy() }),
+            TejarPlatformInterface(context)
+        )
+        server.start()
+        try {
+            // Must not be null: StartOrReloadService dereferences options.AutoRedirect
+            // without a nil check and the core dies with SIGSEGV.
+            server.startOrReloadService(jsonConfig, OverrideOptions())
+        } catch (e: Exception) {
+            try { server.close() } catch (_: Exception) {}
+            throw e
+        }
+        commandServer = server
+        // Only useful once the core is up; the client retries until its socket answers.
+        commandClient.connect()
 
         if (!waitForPort(LOCAL_HOST, LOCAL_PORT, timeoutMs = 3000)) {
             // The core came up but never opened its SOCKS port — don't report Connected for a
             // proxy nothing can actually reach. Tear it down so callers get an Error state and
             // can retry, instead of a UI that says "Connected" while every request fails.
-            try { controller.stopLoop() } catch (_: Exception) {}
-            coreController = null
-            throw Exception("xray core did not open SOCKS port $LOCAL_PORT within timeout")
+            try { server.closeService() } catch (_: Exception) {}
+            try { server.close() } catch (_: Exception) {}
+            commandServer = null
+            throw Exception("sing-box did not open SOCKS port $LOCAL_PORT within timeout")
         }
 
         tryStartForegroundService(config)
