@@ -45,6 +45,10 @@ internal class SingBoxCommandClient(
     @Volatile
     private var client: CommandClient? = null
 
+    /** Set in [Handler.connected]; cleared in [disconnect]. */
+    @Volatile
+    private var handlerConnected = false
+
     fun connect() {
         disconnect()
         val options = CommandClientOptions().apply {
@@ -69,7 +73,18 @@ internal class SingBoxCommandClient(
         }
     }
 
+    /** Blocks until the handler reports connected or [timeoutMs] elapses. */
+    suspend fun awaitConnected(timeoutMs: Long = 3000L): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (handlerConnected && client != null) return true
+            delay(50)
+        }
+        return handlerConnected && client != null
+    }
+
     fun disconnect() {
+        handlerConnected = false
         val current = client ?: return
         client = null
         runCatching { current.disconnect() }
@@ -112,10 +127,12 @@ internal class SingBoxCommandClient(
         }
 
         override fun connected() {
+            handlerConnected = true
             Log.d(TAG, "Command client connected")
         }
 
         override fun disconnected(message: String?) {
+            handlerConnected = false
             Log.d(TAG, "Command client disconnected: $message")
         }
 

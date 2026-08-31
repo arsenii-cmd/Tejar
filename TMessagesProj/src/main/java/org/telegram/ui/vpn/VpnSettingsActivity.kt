@@ -33,6 +33,10 @@ class VpnSettingsActivity : BaseFragment() {
     private var subscriptionsContainer: LinearLayout? = null
     /** Set while a measurement is expected to be followed by switching to the fastest server. */
     private var pendingAutoSelect = false
+    /** Server ids that must be measured (or time out) before auto-select runs. */
+    private var autoSelectTargetIds: Set<String>? = null
+    private var autoSelectTimeoutJob: Job? = null
+    private var pendingMeasureAfterConnect = false
     // configId -> latency in ms as measured by the core itself (-1 = no answer).
     // Seeded from the manager, which restores the last run from disk, so the numbers are
     // already on screen before a fresh measurement finishes.
@@ -90,10 +94,10 @@ class VpnSettingsActivity : BaseFragment() {
                 selectFastestIfRequested(context)
             }
         }
-        // Re-measure whenever the screen opens, so the numbers are current rather than
-        // whatever was left from last time. Needs the core running — urlTest dials through
-        // the real outbounds — so when the VPN is off the stored values stay on screen.
-        manager.measureLatency()
+        // Re-measure when the tunnel is up; skip while paused or connecting.
+        if (manager.isRunning()) {
+            manager.measureLatencyAsync()
+        }
 
         actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setTitle("VPN Proxy")
@@ -401,9 +405,11 @@ class VpnSettingsActivity : BaseFragment() {
         scope.launch {
             manager.state.collect { state ->
                 updateUi(state)
-                // Обновляем список конфигов при каждом изменении состояния
-                // чтобы выделение активного конфига и пинги обновлялись сразу
                 rebuildConfigsList()
+                if (pendingMeasureAfterConnect && state is VpnProxyManager.ProxyState.Connected) {
+                    pendingMeasureAfterConnect = false
+                    manager.measureLatencyAsync()
+                }
             }
         }
 
@@ -421,9 +427,10 @@ class VpnSettingsActivity : BaseFragment() {
         manager.parseLink(text)
             .onSuccess { config ->
                 repository.save(config)
+                manager.invalidateCachedConfig()
                 repository.setActive(config.id)
                 repository.setVpnRunning(true)
-                manager.startProxy(config)
+                manager.selectServer(config)
                 configs.clear()
                 configs.addAll(repository.getAll())
                 rebuildConfigsList()
@@ -489,6 +496,16 @@ class VpnSettingsActivity : BaseFragment() {
                 connectBtn.visibility = View.GONE
                 disconnectBtn.visibility = View.VISIBLE
                 injectProxy()
+                errorCard.visibility = View.GONE
+            }
+            is VpnProxyManager.ProxyState.Paused -> {
+                statusView.text = "Paused"
+                statusSubView.text = state.config.displayName + " \u00B7 Energy Saving"
+                statusSubView.visibility = View.VISIBLE
+                animateStatusDot(COLOR_GRAY)
+                animateStatusCard(COLOR_GRAY_BG)
+                connectBtn.visibility = View.GONE
+                disconnectBtn.visibility = View.VISIBLE
                 errorCard.visibility = View.GONE
             }
             is VpnProxyManager.ProxyState.Error -> {
@@ -700,7 +717,7 @@ class VpnSettingsActivity : BaseFragment() {
                     setOnClickListener {
                         repository.setActive(config.id)
                         repository.setVpnRunning(true)
-                        manager.startProxy(config)
+                        manager.selectServer(config)
                         configs.clear()
                         configs.addAll(repository.getAll())
                         rebuildConfigsList()
@@ -715,10 +732,13 @@ class VpnSettingsActivity : BaseFragment() {
                 setTextColor(COLOR_RED)
                 setPadding(dp(10), dp(4), dp(4), dp(4))
                 setOnClickListener {
-                    if (manager.getCurrentConfig()?.id == config.id) {
+                    val wasActive = manager.getCurrentConfig()?.id == config.id
+                    if (wasActive) {
                         repository.setVpnRunning(false)
-                        manager.stopProxy(); clearProxy()
+                        manager.stopProxy()
+                        clearProxy()
                     }
+                    manager.invalidateCachedConfig()
                     repository.delete(config.id)
                     configs.clear()
                     configs.addAll(repository.getAll())
@@ -856,6 +876,7 @@ class VpnSettingsActivity : BaseFragment() {
                 )
                 subscriptionRepository.save(updatedSub)
 
+                manager.invalidateCachedConfig()
                 configs.clear()
                 configs.addAll(repository.getAll())
                 rebuildConfigsList()
@@ -863,8 +884,8 @@ class VpnSettingsActivity : BaseFragment() {
 
                 Toast.makeText(context, "Loaded ${fetched.size} servers", Toast.LENGTH_SHORT).show()
 
-                // Measure right after a fetch and settle on the fastest server.
-                measureLatency(context, autoSelectFastest = true)
+                val fetchedIds = fetched.map { it.id }.toSet()
+                beginAutoSelect(context, fetchedIds)
             } catch (e: Exception) {
                 Toast.makeText(context, "Failed to fetch: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -872,38 +893,114 @@ class VpnSettingsActivity : BaseFragment() {
     }
 
     /**
-     * Asks the core to measure every server over its real protocol. This replaces the old
-     * TCP probe, which could not say anything true about Hysteria2 (its QUIC port ignores
-     * anything not obfuscated) or NaiveProxy, and on port 443 timed an unrelated listener.
-     *
-     * The measurement runs inside the core, so it needs the tunnel up; with it down the
-     * stored numbers from the last run stay on screen.
+     * Asks the core to measure servers over their real protocol. When [autoSelectFastest] is
+     * true, waits until every id in [targetIds] has a result (or [AUTO_SELECT_TIMEOUT_MS])
+     * before picking the fastest measured server.
      */
-    private fun measureLatency(context: Context, autoSelectFastest: Boolean = false) {
+    private fun measureLatency(
+        context: Context,
+        autoSelectFastest: Boolean = false,
+        targetIds: Set<String>? = null
+    ) {
         if (!manager.isRunning()) {
-            Toast.makeText(context, "Connect first — servers are measured through the tunnel",
-                Toast.LENGTH_SHORT).show()
+            if (autoSelectFastest) {
+                Toast.makeText(context, "Connect first — servers are measured through the tunnel",
+                    Toast.LENGTH_SHORT).show()
+                cancelAutoSelect()
+            }
             return
         }
-        pendingAutoSelect = autoSelectFastest
+        if (autoSelectFastest) {
+            pendingAutoSelect = true
+            autoSelectTargetIds = targetIds ?: configs.map { it.id }.toSet()
+            scheduleAutoSelectTimeout(context)
+        }
         Toast.makeText(context, "Measuring servers…", Toast.LENGTH_SHORT).show()
-        manager.measureLatency()
+        manager.measureLatencyAsync()
     }
 
-    /** Switches to the fastest server that answered, once a measurement comes back. */
-    private fun selectFastestIfRequested(context: Context) {
-        if (!pendingAutoSelect) return
-        // Only servers the core actually measured are eligible; an unmeasured one reports 0
-        // and would otherwise be picked as the fastest while being the one that failed.
-        val candidates = configs.filter { SingBoxLatency.isMeasured(latency[it.id]) }
-        val fastest = candidates.minByOrNull { latency[it.id] ?: Int.MAX_VALUE } ?: return
+    /** After a subscription refresh: connect if needed, then measure and auto-select. */
+    private fun beginAutoSelect(context: Context, fetchedIds: Set<String>) {
+        pendingAutoSelect = true
+        autoSelectTargetIds = fetchedIds
+        scheduleAutoSelectTimeout(context)
+
+        if (manager.isRunning()) {
+            Toast.makeText(context, "Measuring servers…", Toast.LENGTH_SHORT).show()
+            manager.measureLatencyAsync()
+            return
+        }
+
+        val starter = repository.getActive()?.takeIf { it.id in fetchedIds }
+            ?: configs.firstOrNull { it.id in fetchedIds }
+        if (starter == null) {
+            cancelAutoSelect()
+            return
+        }
+        repository.setActive(starter.id)
+        repository.setVpnRunning(true)
+        pendingMeasureAfterConnect = true
+        Toast.makeText(context, "Connecting, then measuring servers…", Toast.LENGTH_SHORT).show()
+        manager.selectServer(starter)
+    }
+
+    private fun scheduleAutoSelectTimeout(context: Context) {
+        autoSelectTimeoutJob?.cancel()
+        autoSelectTimeoutJob = scope.launch {
+            delay(AUTO_SELECT_TIMEOUT_MS)
+            if (pendingAutoSelect) {
+                selectFastestIfRequested(context, force = true)
+            }
+        }
+    }
+
+    private fun cancelAutoSelect() {
         pendingAutoSelect = false
+        autoSelectTargetIds = null
+        pendingMeasureAfterConnect = false
+        autoSelectTimeoutJob?.cancel()
+        autoSelectTimeoutJob = null
+    }
+
+    /** Switches to the fastest server that answered, once every target has a result or timed out. */
+    private fun selectFastestIfRequested(context: Context, force: Boolean = false) {
+        if (!pendingAutoSelect) return
+
+        val targets = autoSelectTargetIds ?: configs.map { it.id }.toSet()
+        if (targets.isEmpty()) {
+            cancelAutoSelect()
+            return
+        }
+
+        val waiting = targets.count { id ->
+            val delay = latency[id]
+            !SingBoxLatency.isMeasured(delay) && !SingBoxLatency.isFailed(delay)
+        }
+        if (!force && waiting > 0) return
+
+        val candidates = configs.filter {
+            it.id in targets && SingBoxLatency.isMeasured(latency[it.id])
+        }
+        if (candidates.isEmpty()) {
+            if (force) {
+                Toast.makeText(context, "No servers responded", Toast.LENGTH_SHORT).show()
+                cancelAutoSelect()
+            }
+            return
+        }
+
+        val fastest = candidates.minByOrNull { latency[it.id] ?: Int.MAX_VALUE } ?: return
+        cancelAutoSelect()
         repository.setActive(fastest.id)
         repository.setVpnRunning(true)
         manager.selectServer(fastest)
         Toast.makeText(context,
             "Connected to ${fastest.displayName} (${latency[fastest.id]}ms)",
             Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        private const val AUTO_SELECT_TIMEOUT_MS = 20_000L
     }
 
     private fun rebuildSubscriptionsList(context: Context) {
@@ -1011,6 +1108,7 @@ class VpnSettingsActivity : BaseFragment() {
     }
 
     override fun onFragmentDestroy() {
+        cancelAutoSelect()
         super.onFragmentDestroy()
         scope.cancel()
     }

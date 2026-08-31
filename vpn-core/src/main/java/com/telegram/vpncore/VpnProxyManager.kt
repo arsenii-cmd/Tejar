@@ -59,6 +59,8 @@ class VpnProxyManager private constructor(private val context: Context) {
         object Idle : ProxyState()
         object Connecting : ProxyState()
         data class Connected(val config: VpnConfig) : ProxyState()
+        /** Tunnel stopped for Energy Saving; command server kept warm for fast resume. */
+        data class Paused(val config: VpnConfig) : ProxyState()
         data class Error(val message: String) : ProxyState()
     }
 
@@ -84,6 +86,9 @@ class VpnProxyManager private constructor(private val context: Context) {
 
     private var commandServer: CommandServer? = null
 
+    /** Last JSON passed to the core — reused on Energy Saving resume without rebuilding. */
+    private var cachedJsonConfig: String? = null
+
     /**
      * Latency per server, keyed by [VpnConfig.id], as measured by the core itself.
      * Read the values through [SingBoxLatency]: they are unsigned, so 0 means "no result"
@@ -102,6 +107,9 @@ class VpnProxyManager private constructor(private val context: Context) {
             runCatching { configRepository.saveLatency(merged) }
         }
     }
+
+    @Volatile
+    private var pauseRequested = false
 
     @Volatile
     private var coreSetupDone = false
@@ -159,7 +167,11 @@ class VpnProxyManager private constructor(private val context: Context) {
             override fun onAvailable(network: Network) {
                 val config = lastConnectedConfig ?: return
                 val current = _state.value
-                if (current is ProxyState.Connected) return
+                // Paused = Energy Saving; Connecting/Connected = already up or in progress.
+                if (current is ProxyState.Connected ||
+                    current is ProxyState.Paused ||
+                    current is ProxyState.Connecting
+                ) return
                 Log.d(TAG, "Network available, auto-reconnecting...")
                 startProxy(config)
             }
@@ -180,6 +192,14 @@ class VpnProxyManager private constructor(private val context: Context) {
 
     // ────────────────────────── Public API ───────────────────────
 
+    /**
+     * Drops the cached sing-box JSON so the next start/resume rebuilds from disk.
+     * Call after the server list changes (subscription refresh, add/delete).
+     */
+    fun invalidateCachedConfig() {
+        cachedJsonConfig = null
+    }
+
     fun parseLink(uri: String): Result<VpnConfig> = runCatching {
         LinkParser.parse(uri)
     }
@@ -187,28 +207,43 @@ class VpnProxyManager private constructor(private val context: Context) {
     fun startProxy(config: VpnConfig) {
         scope.launch {
             mutex.withLock {
-                if (_state.value is ProxyState.Connected) {
-                    stopProxyInternal()
+                when (val current = _state.value) {
+                    is ProxyState.Connected -> stopProxyInternal()
+                    is ProxyState.Paused -> {
+                        if (current.config.id == config.id &&
+                            commandServer != null && cachedJsonConfig != null
+                        ) {
+                            resumeProxyLocked(config)
+                            return@launch
+                        }
+                        stopProxyInternal()
+                    }
+                    else -> Unit
                 }
-                _state.emit(ProxyState.Connecting)
-                try {
-                    val servers = allServersIncluding(config)
-                    val jsonConfig = SingBoxConfigGenerator.generate(
-                        servers, config.id, LOCAL_PORT, socksUsername, socksPassword
-                    )
-                    startCore(jsonConfig, config)
-                    lastConnectedConfig = config
-                    _state.emit(ProxyState.Connected(config))
-                    Log.d(TAG, "Proxy started on $LOCAL_HOST:$LOCAL_PORT")
-                    withContext(Dispatchers.Main) {
-                        connectionListeners.forEach { it.onProxyConnected(LOCAL_HOST, LOCAL_PORT, socksUsername, socksPassword) }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to start proxy", e)
-                    _state.emit(ProxyState.Error(e.message ?: "Unknown error"))
-                    if (autoReconnect) {
-                        lastConnectedConfig = config
-                    }
+                startProxyLocked(config)
+            }
+        }
+    }
+
+    /**
+     * Restarts the tunnel after [pauseProxy]. Reuses the warm command server when possible
+     * instead of a full cold start.
+     */
+    fun resumeProxy() {
+        scope.launch {
+            mutex.withLock {
+                when (_state.value) {
+                    is ProxyState.Connected, is ProxyState.Connecting -> return@launch
+                    else -> Unit
+                }
+                val config = when (val current = _state.value) {
+                    is ProxyState.Paused -> current.config
+                    else -> lastConnectedConfig ?: configRepository.getActive()
+                } ?: return@launch
+                if (commandServer != null && cachedJsonConfig != null) {
+                    resumeProxyLocked(config)
+                } else {
+                    startProxyLocked(config)
                 }
             }
         }
@@ -224,13 +259,15 @@ class VpnProxyManager private constructor(private val context: Context) {
     }
 
     /**
-     * Pauses the proxy without clearing lastConnectedConfig.
-     * Used by Energy Saving mode — the proxy will be resumed when the app returns to foreground.
+     * Pauses the tunnel for Energy Saving: stops SOCKS traffic and the foreground service,
+     * but keeps the command server and cached config so [resumeProxy] can reload quickly.
      */
     fun pauseProxy() {
+        pauseRequested = true
         scope.launch {
             mutex.withLock {
-                stopProxyInternal()
+                pauseProxyInternal()
+                pauseRequested = false
             }
         }
     }
@@ -243,6 +280,7 @@ class VpnProxyManager private constructor(private val context: Context) {
                 try { server.close() } catch (_: Exception) {}
             }
             commandServer = null
+            cachedJsonConfig = null
             commandClient.disconnect()
             stopForegroundService()
             _state.emit(ProxyState.Idle)
@@ -256,6 +294,124 @@ class VpnProxyManager private constructor(private val context: Context) {
         }
     }
 
+    /** Energy Saving: stop the data plane, keep the command server for a fast foreground resume. */
+    private suspend fun pauseProxyInternal() {
+        val config = when (val current = _state.value) {
+            is ProxyState.Connected -> current.config
+            is ProxyState.Connecting -> lastConnectedConfig ?: configRepository.getActive()
+            is ProxyState.Paused -> return
+            else -> return
+        } ?: return
+
+        if (_state.value is ProxyState.Connecting) {
+            stopWatchdog()
+            commandClient.disconnect()
+            commandServer?.let { server ->
+                runCatching { server.closeService() }
+                runCatching { server.close() }
+            }
+            commandServer = null
+            stopForegroundService()
+            lastConnectedConfig = config
+            _state.emit(ProxyState.Paused(config))
+            Log.d(TAG, "Proxy paused during connect (Energy Saving)")
+            withContext(Dispatchers.Main) {
+                connectionListeners.forEach { it.onProxyDisconnected() }
+            }
+            return
+        }
+
+        try {
+            stopWatchdog()
+            commandClient.disconnect()
+            runCatching { commandServer?.closeService() }
+            stopForegroundService()
+            lastConnectedConfig = config
+            _state.emit(ProxyState.Paused(config))
+            Log.d(TAG, "Proxy paused (Energy Saving)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error pausing proxy, full stop", e)
+            stopProxyInternal()
+            return
+        }
+        withContext(Dispatchers.Main) {
+            connectionListeners.forEach { it.onProxyDisconnected() }
+        }
+    }
+
+    private suspend fun startProxyLocked(config: VpnConfig) {
+        _state.emit(ProxyState.Connecting)
+        lastConnectedConfig = config
+        try {
+            val servers = allServersIncluding(config)
+            val jsonConfig = SingBoxConfigGenerator.generate(
+                servers, config.id, LOCAL_PORT, socksUsername, socksPassword
+            )
+            cachedJsonConfig = jsonConfig
+            startCore(jsonConfig, config)
+            _state.emit(ProxyState.Connected(config))
+            if (pauseRequested) {
+                pauseProxyInternal()
+                return
+            }
+            Log.d(TAG, "Proxy started on $LOCAL_HOST:$LOCAL_PORT")
+            withContext(Dispatchers.Main) {
+                connectionListeners.forEach {
+                    it.onProxyConnected(LOCAL_HOST, LOCAL_PORT, socksUsername, socksPassword)
+                }
+            }
+        } catch (e: Exception) {
+            if (e is PauseRequestedException || pauseRequested) {
+                pauseProxyInternal()
+                return
+            }
+            Log.e(TAG, "Failed to start proxy", e)
+            cachedJsonConfig = null
+            _state.emit(ProxyState.Error(e.message ?: "Unknown error"))
+            if (autoReconnect) {
+                lastConnectedConfig = config
+            }
+        }
+    }
+
+    private suspend fun resumeProxyLocked(config: VpnConfig) {
+        val server = commandServer
+        val json = cachedJsonConfig
+        if (server == null || json == null) {
+            startProxyLocked(config)
+            return
+        }
+        _state.emit(ProxyState.Connecting)
+        try {
+            server.startOrReloadService(json, OverrideOptions())
+            commandClient.connect()
+            if (!commandClient.awaitConnected()) {
+                throw Exception("command client did not connect after resume")
+            }
+            // Warm reload: the Go runtime is already up, so the SOCKS port opens faster.
+            if (!waitForPort(LOCAL_HOST, LOCAL_PORT, timeoutMs = 2000)) {
+                throw Exception("sing-box did not reopen SOCKS port $LOCAL_PORT within timeout")
+            }
+            lastConnectedConfig = config
+            _state.emit(ProxyState.Connected(config))
+            Log.d(TAG, "Proxy resumed on $LOCAL_HOST:$LOCAL_PORT")
+            withContext(Dispatchers.Main) {
+                connectionListeners.forEach {
+                    it.onProxyConnected(LOCAL_HOST, LOCAL_PORT, socksUsername, socksPassword)
+                }
+            }
+            tryStartForegroundService(config)
+            startWatchdog()
+        } catch (e: Exception) {
+            Log.w(TAG, "Fast resume failed, falling back to full restart", e)
+            runCatching { server.close() }
+            commandServer = null
+            cachedJsonConfig = null
+            commandClient.disconnect()
+            startProxyLocked(config)
+        }
+    }
+
     /**
      * Every stored server, with [selected] guaranteed present — a config can be started
      * before it has been saved (a freshly parsed link), and leaving it out would produce a
@@ -266,13 +422,28 @@ class VpnProxyManager private constructor(private val context: Context) {
         return if (stored.any { it.id == selected.id }) stored else stored + selected
     }
 
+    /** Energy Saving should pause while connected or still connecting. */
+    fun shouldPauseForEnergySaving(): Boolean = when (_state.value) {
+        is ProxyState.Connected, is ProxyState.Connecting -> true
+        else -> false
+    }
+
     /**
      * Measures every server through its own protocol. Results land in [latency]; the call
      * returns immediately because the core reports them asynchronously.
      */
-    fun measureLatency() {
+    suspend fun measureLatency() {
         if (!isRunning()) return
+        if (!commandClient.awaitConnected()) {
+            Log.w(TAG, "measureLatency skipped: command client not ready")
+            return
+        }
         commandClient.urlTest(SingBoxConfigGenerator.GROUP_TAG)
+    }
+
+    /** Non-blocking wrapper for Java / UI callers. */
+    fun measureLatencyAsync() {
+        scope.launch { measureLatency() }
     }
 
     /**
@@ -280,15 +451,47 @@ class VpnProxyManager private constructor(private val context: Context) {
      * the tunnel up; otherwise it falls back to starting the core on that server.
      */
     fun selectServer(config: VpnConfig) {
-        if (isRunning() && commandClient.selectOutbound(SingBoxConfigGenerator.GROUP_TAG, config.id)) {
-            _state.value = ProxyState.Connected(config)
-            lastConnectedConfig = config
-            return
+        scope.launch {
+            mutex.withLock {
+                selectServerLocked(config)
+            }
         }
-        startProxy(config)
+    }
+
+    private suspend fun selectServerLocked(config: VpnConfig) {
+        if (isRunning()) {
+            if (!commandClient.awaitConnected()) {
+                Log.w(TAG, "selectOutbound skipped: command client not ready")
+                startProxyLocked(config)
+                return
+            }
+            if (commandClient.selectOutbound(SingBoxConfigGenerator.GROUP_TAG, config.id)) {
+                _state.emit(ProxyState.Connected(config))
+                lastConnectedConfig = config
+                return
+            }
+        }
+        when (val current = _state.value) {
+            is ProxyState.Connected -> stopProxyInternal()
+            is ProxyState.Paused -> {
+                if (current.config.id == config.id &&
+                    commandServer != null && cachedJsonConfig != null
+                ) {
+                    resumeProxyLocked(config)
+                    return
+                }
+                stopProxyInternal()
+            }
+            else -> Unit
+        }
+        startProxyLocked(config)
     }
 
     fun isRunning(): Boolean = _state.value is ProxyState.Connected
+
+    fun isPaused(): Boolean = _state.value is ProxyState.Paused
+
+    fun isConnecting(): Boolean = _state.value is ProxyState.Connecting
 
     fun getProxyHost(): String = LOCAL_HOST
 
@@ -297,8 +500,11 @@ class VpnProxyManager private constructor(private val context: Context) {
     /** The per-session SOCKS5 credentials generated for the currently running proxy, if any. */
     fun getSocksCredentials(): Pair<String, String> = socksUsername to socksPassword
 
-    fun getCurrentConfig(): VpnConfig? =
-        (_state.value as? ProxyState.Connected)?.config
+    fun getCurrentConfig(): VpnConfig? = when (val state = _state.value) {
+        is ProxyState.Connected -> state.config
+        is ProxyState.Paused -> state.config
+        else -> null
+    }
 
     // ───────────────────────── sing-box ──────────────────────────
 
@@ -316,11 +522,9 @@ class VpnProxyManager private constructor(private val context: Context) {
         coreSetupDone = true
     }
 
-    private fun startCore(jsonConfig: String, config: VpnConfig) {
+    private suspend fun startCore(jsonConfig: String, config: VpnConfig) {
         ensureCoreSetup()
 
-        // Fail before touching the core if the config can't be parsed — the error message
-        // from checkConfig names the offending field, which a start failure does not.
         Libbox.checkConfig(jsonConfig)
 
         val server = CommandServer(
@@ -329,21 +533,24 @@ class VpnProxyManager private constructor(private val context: Context) {
         )
         server.start()
         try {
-            // Must not be null: StartOrReloadService dereferences options.AutoRedirect
-            // without a nil check and the core dies with SIGSEGV.
             server.startOrReloadService(jsonConfig, OverrideOptions())
         } catch (e: Exception) {
             try { server.close() } catch (_: Exception) {}
             throw e
         }
         commandServer = server
-        // Only useful once the core is up; the client retries until its socket answers.
         commandClient.connect()
+        if (!commandClient.awaitConnected()) {
+            Log.w(TAG, "Command client slow to connect; urlTest/select may retry later")
+        }
 
         if (!waitForPort(LOCAL_HOST, LOCAL_PORT, timeoutMs = 3000)) {
-            // The core came up but never opened its SOCKS port — don't report Connected for a
-            // proxy nothing can actually reach. Tear it down so callers get an Error state and
-            // can retry, instead of a UI that says "Connected" while every request fails.
+            if (pauseRequested) {
+                try { server.closeService() } catch (_: Exception) {}
+                try { server.close() } catch (_: Exception) {}
+                commandServer = null
+                throw PauseRequestedException()
+            }
             try { server.closeService() } catch (_: Exception) {}
             try { server.close() } catch (_: Exception) {}
             commandServer = null
@@ -354,9 +561,15 @@ class VpnProxyManager private constructor(private val context: Context) {
         startWatchdog()
     }
 
+    private class PauseRequestedException : Exception()
+
     private fun waitForPort(host: String, port: Int, timeoutMs: Int): Boolean {
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < timeoutMs) {
+            if (pauseRequested) {
+                Log.d(TAG, "waitForPort aborted: Energy Saving pause requested")
+                return false
+            }
             try {
                 java.net.Socket().use { socket ->
                     socket.connect(java.net.InetSocketAddress(host, port), 500)

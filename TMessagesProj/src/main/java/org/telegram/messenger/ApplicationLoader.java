@@ -386,17 +386,15 @@ public class ApplicationLoader extends Application {
                     if (!vpnRepo.isVpnRunning()) return;
                     com.telegram.vpncore.VpnConfig config = vpnRepo.getActive();
                     if (config != null && !vpnManager.isRunning()) {
-                        vpnManager.startProxy(config);  // listener will call enableProxy when ready
+                        vpnManager.resumeProxy();  // fast path after Energy Saving pause
                     }
                 }
 
                 @Override
                 public void onBecameBackground() {
                     if (!vpnRepo.isEnergySaving()) return;
-                    if (vpnManager.isRunning()) {
-                        // Останавливаем прокси без изменения vpn_running,
-                        // чтобы при возврате в приложение он снова запустился.
-                        // Listener will call disableProxy automatically.
+                    if (vpnManager.shouldPauseForEnergySaving()) {
+                        // Stops the tunnel (or aborts an in-progress connect) without clearing vpn_running.
                         vpnManager.pauseProxy();
                     }
                 }
